@@ -204,10 +204,34 @@ def build_policy_index_map(data):
     return index_to_policy
 
 
-def extract_agent_ids(flat_obs, unflatten_context):
-    """Extract agent IDs from flat observations."""
-    env_outputs = unpack_batched_obs(flat_obs, unflatten_context)
+def unpack_observations(flat_obs, unflatten_context):
+    """Unpack flat observations into structured fields.
+
+    Returns the full env_outputs dict with tensors on CPU.
+    """
+    return unpack_batched_obs(flat_obs, unflatten_context)
+
+
+def extract_agent_ids(env_outputs):
+    """Extract agent IDs from unpacked observations."""
     return env_outputs["AgentId"][:, 0].cpu().numpy().astype(int)
+
+
+# Raw observation fields to save (skip Task embedding and ActionTargets)
+OBS_FIELDS = ["Tile", "Entity", "Inventory", "Market", "CurrentTick"]
+
+
+def build_observation_record(env_outputs, idx):
+    """Build a dict of raw observation arrays for a single agent."""
+    obs = {}
+    for field in OBS_FIELDS:
+        if field not in env_outputs:
+            continue
+        val = env_outputs[field][idx]
+        if hasattr(val, "cpu"):
+            val = val.cpu()
+        obs[field] = val.numpy().tolist()
+    return obs
 
 
 def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None):
@@ -288,7 +312,8 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None):
                     data.next_lstm_state[1][:, env_id] = c
 
             actions_np = actions.cpu().numpy()
-            agent_ids = extract_agent_ids(o_tensor.to(data.device), unflatten_context)
+            env_outputs = unpack_observations(o_tensor.to(data.device), unflatten_context)
+            agent_ids = extract_agent_ids(env_outputs)
 
             # Reconstruct per-policy activation tensors
             policy_activations = {}
@@ -322,7 +347,7 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None):
                         "env_id": int(env_id[idx]),
                         "agent_id": int(agent_ids[idx]),
                         "activation": activation,
-                        "observation": o[idx].tolist(),
+                        "observation": build_observation_record(env_outputs, idx),
                         "action": actions_np[idx].tolist(),
                     }
                 )
