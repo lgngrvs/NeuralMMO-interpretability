@@ -1,10 +1,8 @@
-[build-system]
-requires = ["pip>=23.0", "setuptools>=61.0", "wheel"]
-
 [project]
 name = "nmmo2-baselines"
 version = "0.1.0"
 description = "Neural MMO 2023 competition baselines"
+requires-python = ">=3.10,<3.12"
 keywords = []
 classifiers = [
 	"Natural Language :: English",
@@ -20,15 +18,11 @@ dependencies = [
     "polars",
     "pufferlib[nmmo]==0.7.3",
     "psutil<6",
-    "syllabus-rl@git+https://github.com/kywch/Syllabus@nmmo",  # To replace with pip later
+    "syllabus-rl@git+https://github.com/kywch/Syllabus@nmmo",
     "torch>2",
     "transformers",
     "wandb",
 ]
-
-[tool.setuptools.packages.find]
-where = ["."]
-exclude = ["tests"]
 
 [project.optional-dependencies]
 monitoring = [
@@ -39,8 +33,11 @@ dev = [
     "ruff"
 ]
 
-[tool.distutils.bdist_wheel]
-universal = true
+[tool.uv]
+package = false
+override-dependencies = [
+    "ray>=2.3",
+]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.

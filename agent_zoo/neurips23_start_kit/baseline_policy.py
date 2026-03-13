@@ -138,7 +138,7 @@ class PlayerEncoder(torch.nn.Module):
 
         # batch, agent, attrs, embed = agent_embeddings.shape
         my_agent_embeddings = one_hot_agents[torch.arange(one_hot_agents.shape[0]), row_indices]
-        agent_embeddings = self.agent_fc(one_hot_agents.cuda())
+        agent_embeddings = self.agent_fc(one_hot_agents.to(self.agent_fc.weight.device))
         my_agent_embeddings = self.my_agent_fc(my_agent_embeddings)
         my_agent_embeddings = F.relu(my_agent_embeddings)
 
