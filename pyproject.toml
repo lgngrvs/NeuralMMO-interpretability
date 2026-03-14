@@ -28,6 +28,12 @@ dependencies = [
 monitoring = [
     "nvitop"
 ]
+analysis = [
+    "umap-learn",
+    "hdbscan",
+    "matplotlib",
+    "scikit-learn",
+]
 dev = [
     "pre-commit",
     "ruff"
