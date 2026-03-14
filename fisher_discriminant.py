@@ -349,7 +349,98 @@ def mahalanobis_cosine_similarity(activations, labels):
     }
 
 
-def generate_report(pairwise_results, feature_results, mahal_results, output_dir):
+def null_hypothesis_test(activations, labels, n_random=200, seed=42):
+    """Test whether real clusters differ from random subsets of the same size.
+
+    Draws random "fake clusters" from the full dataset (same sizes as the real
+    small clusters), then computes the same statistics (whitened cosine similarity,
+    feature-subspace distance, centroid distance) for random pairs. Compares the
+    real cluster statistics to the null distribution.
+    """
+    from sklearn.decomposition import PCA
+
+    rng = np.random.RandomState(seed)
+    unique_labels = sorted(set(labels) - {-1})
+    global_mean = activations.mean(axis=0)
+
+    # Identify small clusters (not the largest one)
+    cluster_sizes = {lab: (labels == lab).sum() for lab in unique_labels}
+    largest = max(cluster_sizes, key=cluster_sizes.get)
+    small_labels = [lab for lab in unique_labels if lab != largest]
+    small_sizes = [cluster_sizes[lab] for lab in small_labels]
+
+    # Whitening setup (same as mahalanobis_cosine_similarity)
+    pca = PCA(n_components=min(activations.shape[1], len(activations) - len(unique_labels)))
+    pca.fit(activations)
+    components = pca.components_
+    explained_var = pca.explained_variance_
+    reg = 1e-6 * explained_var.max()
+    whitening_scale = 1.0 / np.sqrt(explained_var + reg)
+
+    def whiten_displacement(centroid):
+        delta = centroid - global_mean
+        delta_pca = components @ delta
+        return delta_pca * whitening_scale
+
+    # Real cluster stats
+    real_displacements = {}
+    real_centroids = {}
+    for lab in small_labels:
+        mask = labels == lab
+        real_centroids[lab] = activations[mask].mean(axis=0)
+        real_displacements[lab] = whiten_displacement(real_centroids[lab])
+
+    # Real pairwise whitened cosine between small clusters
+    real_cosines = []
+    for i, la in enumerate(small_labels):
+        for j, lb in enumerate(small_labels):
+            if j <= i:
+                continue
+            da, db = real_displacements[la], real_displacements[lb]
+            cos = np.dot(da, db) / (np.linalg.norm(da) * np.linalg.norm(db))
+            real_cosines.append(cos)
+
+    # Real distances from global mean (whitened norm)
+    real_norms = [np.linalg.norm(real_displacements[lab]) for lab in small_labels]
+
+    # Null distribution: draw random subsets, compute same stats
+    null_cosines = []
+    null_norms = []
+
+    # Draw n_random random subsets for each small cluster size
+    typical_size = int(np.mean(small_sizes))
+    random_displacements = []
+    for i in range(n_random):
+        idx = rng.choice(len(activations), size=typical_size, replace=False)
+        centroid = activations[idx].mean(axis=0)
+        disp = whiten_displacement(centroid)
+        random_displacements.append(disp)
+        null_norms.append(np.linalg.norm(disp))
+
+    # Pairwise cosines between random subsets (sample pairs)
+    n_pairs = min(5000, n_random * (n_random - 1) // 2)
+    for _ in range(n_pairs):
+        i, j = rng.choice(n_random, size=2, replace=False)
+        da, db = random_displacements[i], random_displacements[j]
+        na, nb = np.linalg.norm(da), np.linalg.norm(db)
+        if na > 1e-10 and nb > 1e-10:
+            null_cosines.append(np.dot(da, db) / (na * nb))
+
+    null_cosines = np.array(null_cosines)
+    null_norms = np.array(null_norms)
+
+    return {
+        "small_labels": small_labels,
+        "real_cosines": np.array(real_cosines),
+        "null_cosines": null_cosines,
+        "real_norms": np.array(real_norms),
+        "null_norms": null_norms,
+        "typical_size": typical_size,
+        "n_random": n_random,
+    }
+
+
+def generate_report(pairwise_results, feature_results, mahal_results, null_results, output_dir):
     """Generate text report and plots."""
     import matplotlib
     matplotlib.use("Agg")
@@ -457,6 +548,48 @@ def generate_report(pairwise_results, feature_results, mahal_results, output_dir
             f.write(f"  {'Rank':>4s}  {'Dim':>5s}  {'Contrib':>8s}\n")
             for rank, (dim, contrib) in enumerate(mahal_results["top_dims_per_cluster"][lab][:10]):
                 f.write(f"  {rank+1:4d}  {dim:5d}  {contrib:8.3f}\n")
+
+        # Null hypothesis test results
+        f.write("\n\nNull Hypothesis Test: Are Clusters Different from Random Subsets?\n")
+        f.write("=" * 60 + "\n")
+        f.write(f"  Drew {null_results['n_random']} random subsets of size "
+                f"{null_results['typical_size']} from the full dataset.\n\n")
+
+        f.write("  Whitened cosine similarity (pairwise):\n")
+        rc = null_results['real_cosines']
+        nc = null_results['null_cosines']
+        f.write(f"    Real clusters (C{','.join(str(l) for l in null_results['small_labels'])}):\n")
+        f.write(f"      mean={rc.mean():+.4f}  std={rc.std():.4f}  "
+                f"range=[{rc.min():+.4f}, {rc.max():+.4f}]\n")
+        f.write(f"    Random subsets:\n")
+        f.write(f"      mean={nc.mean():+.4f}  std={nc.std():.4f}  "
+                f"range=[{nc.min():+.4f}, {nc.max():+.4f}]\n")
+        # p-value: fraction of null cosines <= real mean
+        p_cosine = (nc <= rc.mean()).mean()
+        f.write(f"    p-value (real mean <= null): {p_cosine:.4f}\n\n")
+
+        f.write("  Whitened displacement norm (distance from global mean):\n")
+        rn = null_results['real_norms']
+        nn = null_results['null_norms']
+        f.write(f"    Real clusters:  mean={rn.mean():.3f}  std={rn.std():.3f}  "
+                f"range=[{rn.min():.3f}, {rn.max():.3f}]\n")
+        f.write(f"    Random subsets: mean={nn.mean():.3f}  std={nn.std():.3f}  "
+                f"range=[{nn.min():.3f}, {nn.max():.3f}]\n")
+        # How many standard deviations above/below are real norms?
+        z_norm = (rn.mean() - nn.mean()) / nn.std() if nn.std() > 0 else 0
+        f.write(f"    z-score (real vs null): {z_norm:+.2f}\n")
+        p_norm = (nn >= rn.mean()).mean()
+        f.write(f"    p-value (real norm >= null): {p_norm:.4f}\n")
+
+        if rn.mean() > nn.mean() + 2 * nn.std():
+            f.write("\n  >> Real clusters are FARTHER from the mean than random subsets.\n")
+            f.write("     These are genuine outlier groups, not random noise.\n")
+        elif rn.mean() < nn.mean() - 2 * nn.std():
+            f.write("\n  >> Real clusters are CLOSER to the mean than random subsets.\n")
+            f.write("     Clusters may be arbitrary partitions of the dense core.\n")
+        else:
+            f.write("\n  >> Real cluster norms are WITHIN the null range.\n")
+            f.write("     Cannot distinguish from random subsets by displacement alone.\n")
 
     print(f"  Wrote {report_path}")
 
@@ -598,10 +731,52 @@ def generate_report(pairwise_results, feature_results, mahal_results, output_dir
     plt.close(fig)
     print(f"  Wrote {mahal_path}")
 
+    # --- Plot 5: Null hypothesis comparison ---
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Cosine similarity distributions
+    ax1.hist(null_results['null_cosines'], bins=50, density=True, alpha=0.6,
+             color='gray', label=f"Random pairs (n={len(null_results['null_cosines'])})")
+    for i, cos in enumerate(null_results['real_cosines']):
+        sl = null_results['small_labels']
+        # Generate pair label from index
+        pair_idx = 0
+        for a in range(len(sl)):
+            for b in range(a+1, len(sl)):
+                if pair_idx == i:
+                    pair_label = f"C{sl[a]} vs C{sl[b]}"
+                pair_idx += 1
+        ax1.axvline(cos, color=f"C{i}", linewidth=2, label=f"{pair_label}: {cos:+.3f}")
+    ax1.set_xlabel("Whitened cosine similarity")
+    ax1.set_ylabel("Density")
+    ax1.set_title("Pairwise Cosine Similarity:\nReal Clusters vs Random Subsets")
+    ax1.legend(fontsize=7)
+    ax1.grid(True, alpha=0.3)
+
+    # Displacement norm distributions
+    ax2.hist(null_results['null_norms'], bins=50, density=True, alpha=0.6,
+             color='gray', label=f"Random subsets (n={null_results['n_random']})")
+    for i, (lab, norm) in enumerate(zip(null_results['small_labels'],
+                                         null_results['real_norms'])):
+        ax2.axvline(norm, color=f"C{i}", linewidth=2, label=f"C{lab}: {norm:.2f}")
+    ax2.set_xlabel("Whitened displacement norm")
+    ax2.set_ylabel("Density")
+    ax2.set_title("Distance from Global Mean:\nReal Clusters vs Random Subsets")
+    ax2.legend(fontsize=7)
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle("Null Hypothesis Test: Are Clusters Different from Random Subsets?",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    null_path = os.path.join(output_dir, "null_hypothesis.png")
+    fig.savefig(null_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {null_path}")
+
     import shutil
     if shutil.which("imgcat"):
         import subprocess
-        for img in [acc_path, dist_path, eig_path, mahal_path]:
+        for img in [acc_path, dist_path, eig_path, mahal_path, null_path]:
             subprocess.run(["imgcat", img], check=False)
 
 
@@ -660,10 +835,14 @@ def main():
     print(f"\nComputing Mahalanobis cosine similarity...")
     mahal_results = mahalanobis_cosine_similarity(activations_clean, labels_clean)
 
+    # Null hypothesis test
+    print(f"\nRunning null hypothesis test...")
+    null_results = null_hypothesis_test(activations_clean, labels_clean)
+
     # Generate report
     output_dir = args.output_dir or str(cluster_dir / "fisher")
     print(f"\nWriting outputs to {output_dir}/")
-    generate_report(pairwise_results, feature_results, mahal_results, output_dir)
+    generate_report(pairwise_results, feature_results, mahal_results, null_results, output_dir)
     print("\nDone.")
 
 
