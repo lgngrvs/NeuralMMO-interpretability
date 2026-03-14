@@ -44,7 +44,8 @@ _original_get_policy = pufferlib.policy_store.PolicyStore.get_policy
 
 def _patched_get_policy(self, name):
     path = os.path.join(self.path, name + ".pt")
-    return torch.load(path, map_location=torch.device("cpu"), weights_only=False)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.load(path, map_location=torch.device(device), weights_only=False)
 
 
 pufferlib.policy_store.PolicyStore.get_policy = _patched_get_policy
