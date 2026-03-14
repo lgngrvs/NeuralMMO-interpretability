@@ -23,8 +23,10 @@ NUM_PVP_EVAL_EPISODE = 200  # TODO: cannot do more due to memory leak
 
 
 def get_eval_config(debug=False):
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     return {
-        "device": "cuda",
+        "device": device,
         "num_envs": 6 if not debug else 1,
         "batch_size": 2**15 if not debug else 2**12,
     }

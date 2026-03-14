@@ -6,6 +6,8 @@ checkpoints
 wandb
 maps
 pool
+activation_data/
+resources
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
