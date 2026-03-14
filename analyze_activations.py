@@ -1,0 +1,544 @@
+"""Cluster activation vectors and test for interpretable behavioral modes.
+
+Loads per-timestep activation records (from extract_activations.py), subsamples
+trajectories, runs UMAP + HDBSCAN, and checks whether clusters correspond to
+distinct behavioral features with large effect sizes vs random baselines.
+"""
+
+import argparse
+import json
+import os
+import sys
+import threading
+import time
+import warnings
+from collections import defaultdict
+from contextlib import contextmanager
+from pathlib import Path
+
+import numpy as np
+from tqdm import tqdm
+
+# Entity observation column indices (from nmmo EntityState)
+ENT_ID = 0
+ENT_NPC_TYPE = 1
+ENT_ATTACKER_ID = 8
+ENT_LATEST_COMBAT_TICK = 9
+ENT_GOLD = 11
+ENT_HEALTH = 12
+ENT_FOOD = 13
+ENT_WATER = 14
+ENT_MELEE_LVL = 15
+ENT_RANGE_LVL = 17
+ENT_MAGE_LVL = 19
+
+# Action indices in the flattened MultiDiscrete (alphabetical, Comm excluded)
+ACT_MOVE_DIR = 8
+ACT_MOVE_NOOP = 4
+ACT_ATTACK_TARGET = 1
+ACT_ATTACK_NOOP = 100
+ACT_BUY_ITEM = 2
+ACT_BUY_NOOP = 384
+ACT_SELL_ITEM = 9
+ACT_SELL_NOOP = 12
+ACT_GIVE_ITEM = 4
+ACT_GIVE_NOOP = 12
+
+SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+@contextmanager
+def spinner(message):
+    """Show a spinning indicator while a block runs."""
+    stop = threading.Event()
+
+    def spin():
+        i = 0
+        while not stop.is_set():
+            sys.stderr.write(f"\r{SPINNER_CHARS[i % len(SPINNER_CHARS)]} {message}")
+            sys.stderr.flush()
+            i += 1
+            time.sleep(0.1)
+
+    t = threading.Thread(target=spin, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join()
+        sys.stderr.write(f"\r✓ {message}\n")
+        sys.stderr.flush()
+
+
+FEATURE_NAMES = [
+    "n_visible_entities",
+    "n_visible_npcs",
+    "n_visible_players",
+    "self_health",
+    "self_food",
+    "self_water",
+    "self_gold",
+    "max_combat_level",
+    "in_combat",
+    "n_inventory_items",
+    "tick",
+    "is_moving",
+    "is_attacking",
+    "is_trading",
+]
+
+
+def _is_alive(record):
+    """Check if the agent is alive (self row present with health > 0)."""
+    agent_id = record["agent_id"]
+    if agent_id == 0:  # padding/empty agent slot
+        return False
+    entity = record["observation"]["Entity"]
+    for row in entity:
+        if row[ENT_ID] == agent_id:
+            return row[ENT_HEALTH] > 0
+    return False
+
+
+def load_data(path, subsample_rate=10):
+    """Load activation records from a directory, subsampling per trajectory.
+
+    Filters out dead agent timesteps before subsampling.
+    Returns (subsampled_records, total_datapoints) where total_datapoints is the
+    count before subsampling/filtering.
+    """
+    all_records = []
+    total_datapoints = 0
+    data_dir = Path(path)
+
+    json_files = list(data_dir.rglob("activations.json"))
+    if not json_files:
+        raise FileNotFoundError(f"No activations.json found under {path}")
+
+    for json_file in json_files:
+        file_size = os.path.getsize(json_file)
+        import orjson
+        print(f"Loading {json_file.name} ({file_size / 1024 / 1024:.0f} MB)...",
+              flush=True)
+        with open(json_file, "rb") as fh:
+            records = orjson.loads(fh.read())
+        total_datapoints += len(records)
+        print(f"  {len(records)} records loaded")
+
+        # Filter out dead timesteps
+        alive_records = []
+        n_dead = 0
+        for r in tqdm(records, desc="Filtering dead timesteps", unit="rec"):
+            if _is_alive(r):
+                alive_records.append(r)
+            else:
+                n_dead += 1
+        print(f"  {n_dead} dead timesteps removed, {len(alive_records)} alive "
+              f"({n_dead / len(records) * 100:.1f}% dead)")
+
+        # Group by trajectory (env_id, agent_id)
+        trajectories = defaultdict(list)
+        for r in tqdm(alive_records, desc="Grouping records", unit="rec"):
+            trajectories[(r["env_id"], r["agent_id"])].append(r)
+
+        # Sort each trajectory by step and subsample
+        for key in tqdm(trajectories, desc="Subsampling trajectories", unit="traj"):
+            traj = sorted(trajectories[key], key=lambda r: r["step"])
+            all_records.extend(traj[::subsample_rate])
+
+    print(f"Loaded {total_datapoints} records, {len(all_records)} after filtering + subsampling (rate={subsample_rate})")
+    return all_records, total_datapoints
+
+
+def compute_features(records):
+    """Extract activations, interpretable features, and metadata from records."""
+    N = len(records)
+    activations = np.zeros((N, len(records[0]["activation"])), dtype=np.float32)
+    features = np.zeros((N, len(FEATURE_NAMES)), dtype=np.float32)
+    metadata = {"step": np.zeros(N, dtype=int), "env_id": np.zeros(N, dtype=int),
+                "agent_id": np.zeros(N, dtype=int)}
+
+    for i, r in enumerate(tqdm(records, desc="Computing features", unit="rec")):
+        activations[i] = r["activation"]
+        metadata["step"][i] = r["step"]
+        metadata["env_id"][i] = r["env_id"]
+        metadata["agent_id"][i] = r["agent_id"]
+
+        obs = r["observation"]
+        action = r["action"]
+        entity = np.array(obs["Entity"], dtype=np.float32)
+        inventory = np.array(obs["Inventory"], dtype=np.float32)
+        current_tick = np.array(obs["CurrentTick"], dtype=np.float32).item()
+        agent_id = r["agent_id"]
+
+        # Visible entities: rows where id != 0
+        visible_mask = entity[:, ENT_ID] != 0
+        n_visible = visible_mask.sum()
+
+        # Split NPCs vs players among visible entities
+        visible_ents = entity[visible_mask]
+        npc_mask = visible_ents[:, ENT_NPC_TYPE] > 0
+        player_mask = visible_ents[:, ENT_NPC_TYPE] == 0
+
+        # Find self row
+        self_mask = entity[:, ENT_ID] == agent_id
+        if self_mask.any():
+            self_row = entity[self_mask][0]
+            self_health = self_row[ENT_HEALTH]
+            self_food = self_row[ENT_FOOD]
+            self_water = self_row[ENT_WATER]
+            self_gold = self_row[ENT_GOLD]
+            max_combat = max(self_row[ENT_MELEE_LVL], self_row[ENT_RANGE_LVL],
+                             self_row[ENT_MAGE_LVL])
+            in_combat = (self_row[ENT_ATTACKER_ID] != 0 or
+                         (current_tick - self_row[ENT_LATEST_COMBAT_TICK]) < 10)
+            # Don't count self as a visible player
+            n_players = player_mask.sum() - 1
+        else:
+            self_health = self_food = self_water = self_gold = max_combat = 0
+            in_combat = False
+            n_players = player_mask.sum()
+
+        # Inventory: non-zero rows (check if any column is non-zero)
+        n_inv = (np.abs(inventory).sum(axis=1) > 0).sum()
+
+        # Action features
+        is_moving = action[ACT_MOVE_DIR] != ACT_MOVE_NOOP
+        is_attacking = action[ACT_ATTACK_TARGET] != ACT_ATTACK_NOOP
+        is_trading = (action[ACT_BUY_ITEM] != ACT_BUY_NOOP or
+                      action[ACT_SELL_ITEM] != ACT_SELL_NOOP or
+                      action[ACT_GIVE_ITEM] != ACT_GIVE_NOOP)
+
+        features[i] = [
+            n_visible, npc_mask.sum(), max(0, n_players),
+            self_health, self_food, self_water, self_gold, max_combat,
+            float(in_combat), n_inv, current_tick,
+            float(is_moving), float(is_attacking), float(is_trading),
+        ]
+
+    return activations, features, metadata
+
+
+def run_umap(activations, n_neighbors=15, min_dist=0.1, random_state=42):
+    """Reduce activations to 2D with UMAP.
+
+    Returns (embedding, reducer) so the fitted UMAP model can be reused for
+    projecting new points via reducer.transform().
+    """
+    import io
+    import umap
+
+    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist,
+                        n_components=2, random_state=random_state, verbose=True)
+    # UMAP verbose=True writes progress bars to stderr (good) but also prints
+    # epoch logs to stdout that arrive out of order. Suppress the stdout spam
+    # and the n_jobs UserWarning.
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            embedding = reducer.fit_transform(activations)
+    finally:
+        sys.stdout = old_stdout
+    return embedding, reducer
+
+
+def run_hdbscan(embedding, min_cluster_size=15, min_samples=5):
+    """Cluster UMAP embedding with HDBSCAN.
+
+    Returns (labels, clusterer) so the fitted model can be reused for
+    predicting cluster membership of new points via approximate_predict().
+    """
+    import hdbscan
+
+    with spinner(f"Running HDBSCAN (min_cluster_size={min_cluster_size})"):
+        clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size,
+                                     min_samples=min_samples,
+                                     prediction_data=True)
+        labels = clusterer.fit_predict(embedding)
+
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    n_noise = (labels == -1).sum()
+    print(f"  Found {n_clusters} clusters, {n_noise} noise points "
+          f"({n_noise / len(labels) * 100:.1f}%)")
+    return labels, clusterer
+
+
+def normalized_entropy(counts):
+    """Compute normalized entropy (0-1) from an array of counts."""
+    counts = counts[counts > 0]
+    if len(counts) <= 1:
+        return 0.0
+    probs = counts / counts.sum()
+    ent = -np.sum(probs * np.log(probs))
+    max_ent = np.log(len(counts))
+    return ent / max_ent if max_ent > 0 else 0.0
+
+
+def compute_cluster_stats(features, labels, metadata, n_baseline_samples=100,
+                          rng_seed=42):
+    """Compute per-cluster feature stats, Cohen's d vs random baseline, and confounders."""
+    rng = np.random.RandomState(rng_seed)
+    unique_labels = sorted(set(labels))
+    if -1 in unique_labels:
+        unique_labels.remove(-1)
+
+    N = len(features)
+    n_features = features.shape[1]
+
+    # Precompute step bins for entropy
+    step_bins = np.digitize(metadata["step"],
+                            np.linspace(metadata["step"].min(),
+                                        metadata["step"].max() + 1, 21))
+
+    stats = {}
+    for label in tqdm(unique_labels, desc="Computing cluster stats", unit="cluster"):
+        mask = labels == label
+        K = mask.sum()
+        cluster_features = features[mask]
+        cluster_means = cluster_features.mean(axis=0)
+
+        # Random contiguous window baseline
+        baseline_means = np.zeros((n_baseline_samples, n_features))
+        for b in range(n_baseline_samples):
+            start = rng.randint(0, max(1, N - K))
+            end = min(start + K, N)
+            baseline_means[b] = features[start:end].mean(axis=0)
+
+        baseline_mean_of_means = baseline_means.mean(axis=0)
+        baseline_std = baseline_means.std(axis=0)
+
+        # Cohen's d: (cluster_mean - baseline_mean) / pooled_sd
+        # Use cluster std and baseline std for pooled estimate
+        cluster_std = cluster_features.std(axis=0)
+        pooled_sd = np.sqrt((cluster_std ** 2 + baseline_std ** 2) / 2)
+        cohens_d = np.where(pooled_sd > 1e-8,
+                            (cluster_means - baseline_mean_of_means) / pooled_sd,
+                            0.0)
+
+        # Confounder: step entropy
+        cluster_step_bins = step_bins[mask]
+        step_counts = np.bincount(cluster_step_bins, minlength=21)[1:]  # skip bin 0
+        step_ent = normalized_entropy(step_counts)
+
+        # Confounder: agent entropy
+        cluster_agents = metadata["agent_id"][mask]
+        agent_counts = np.bincount(cluster_agents)
+        agent_ent = normalized_entropy(agent_counts)
+
+        # Top features by |Cohen's d|
+        top_idx = np.argsort(np.abs(cohens_d))[::-1]
+
+        stats[label] = {
+            "size": int(K),
+            "means": cluster_means,
+            "cohens_d": cohens_d,
+            "top_features": top_idx,
+            "step_entropy": step_ent,
+            "agent_entropy": agent_ent,
+        }
+
+    return stats
+
+
+def generate_outputs(embedding, labels, features, stats, output_dir):
+    """Generate summary text and plots."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- summary.txt ---
+    summary_path = os.path.join(output_dir, "summary.txt")
+    with open(summary_path, "w") as f:
+        f.write("Activation Clustering Analysis\n")
+        f.write("=" * 60 + "\n\n")
+
+        n_clusters = len(stats)
+        n_noise = (labels == -1).sum()
+        f.write(f"Total points: {len(labels)}\n")
+        f.write(f"Clusters: {n_clusters}\n")
+        f.write(f"Noise points: {n_noise} ({n_noise / len(labels) * 100:.1f}%)\n\n")
+
+        for label in sorted(stats.keys()):
+            s = stats[label]
+            f.write(f"--- Cluster {label} (n={s['size']}) ---\n")
+            f.write(f"  Step entropy:  {s['step_entropy']:.3f} "
+                    f"{'(OK)' if s['step_entropy'] > 0.5 else '(LOW - temporal confound?)'}\n")
+            f.write(f"  Agent entropy: {s['agent_entropy']:.3f} "
+                    f"{'(OK)' if s['agent_entropy'] > 0.5 else '(LOW - agent confound?)'}\n")
+            f.write(f"  Top features by |Cohen's d|:\n")
+            for rank, idx in enumerate(s["top_features"][:5]):
+                d = s["cohens_d"][idx]
+                m = s["means"][idx]
+                f.write(f"    {rank + 1}. {FEATURE_NAMES[idx]:25s}  "
+                        f"mean={m:8.2f}  d={d:+.2f}\n")
+            f.write("\n")
+
+    print(f"  Wrote {summary_path}")
+
+    # --- umap_scatter.png ---
+    fig, ax = plt.subplots(figsize=(10, 8))
+    noise_mask = labels == -1
+    if noise_mask.any():
+        ax.scatter(embedding[noise_mask, 0], embedding[noise_mask, 1],
+                   c="lightgray", s=1, alpha=0.3, label="noise")
+    cluster_labels = sorted(set(labels) - {-1})
+    cmap = plt.colormaps.get_cmap("tab20").resampled(max(len(cluster_labels), 1))
+    for i, label in enumerate(cluster_labels):
+        mask = labels == label
+        ax.scatter(embedding[mask, 0], embedding[mask, 1],
+                   c=[cmap(i)], s=3, alpha=0.5, label=f"C{label}")
+    ax.set_title("UMAP Embedding Colored by HDBSCAN Cluster")
+    ax.set_xlabel("UMAP 1")
+    ax.set_ylabel("UMAP 2")
+    if len(cluster_labels) <= 20:
+        ax.legend(markerscale=4, fontsize=8)
+    abs_output_dir = os.path.abspath(output_dir)
+    ax.text(1.0, -0.02, abs_output_dir, ha="right", va="top",
+            fontsize=5, color="gray", family="monospace", transform=ax.transAxes)
+    scatter_path = os.path.join(output_dir, "umap_scatter.png")
+    fig.savefig(scatter_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {scatter_path}")
+
+    # --- cluster_features.png ---
+    if not stats:
+        print("No clusters found, skipping feature plot.")
+        return
+
+    cluster_ids = sorted(stats.keys())
+    n_feats = len(FEATURE_NAMES)
+    d_matrix = np.array([stats[c]["cohens_d"] for c in cluster_ids])
+
+    fig, ax = plt.subplots(figsize=(max(12, n_feats * 0.8), max(4, len(cluster_ids) * 0.6)))
+    im = ax.imshow(d_matrix, aspect="auto", cmap="RdBu_r", vmin=-3, vmax=3)
+    ax.set_xticks(range(n_feats))
+    ax.set_xticklabels(FEATURE_NAMES, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(range(len(cluster_ids)))
+    ax.set_yticklabels([f"C{c} (n={stats[c]['size']})" for c in cluster_ids], fontsize=8)
+    ax.set_title("Cohen's d per Feature per Cluster")
+    fig.colorbar(im, ax=ax, label="Cohen's d")
+
+    # Annotate cells
+    for i in range(len(cluster_ids)):
+        for j in range(n_feats):
+            val = d_matrix[i, j]
+            if abs(val) > 0.5:
+                ax.text(j, i, f"{val:.1f}", ha="center", va="center",
+                        fontsize=6, color="white" if abs(val) > 1.5 else "black")
+
+    ax.text(1.0, -0.02, abs_output_dir, ha="right", va="top",
+            fontsize=5, color="gray", family="monospace", transform=ax.transAxes)
+    feat_path = os.path.join(output_dir, "cluster_features.png")
+    fig.savefig(feat_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {feat_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Cluster activation vectors and analyze behavioral modes")
+    parser.add_argument("data_dir", type=str,
+                        help="Directory containing activation data (from extract_activations.py)")
+    parser.add_argument("--subsample", type=int, default=10,
+                        help="Keep every Nth record per trajectory (default: 10)")
+    parser.add_argument("--hdbscan-min-cluster", type=int, default=15,
+                        help="HDBSCAN min_cluster_size (default: 15)")
+    parser.add_argument("--hdbscan-min-samples", type=int, default=5,
+                        help="HDBSCAN min_samples (default: 5)")
+    parser.add_argument("--umap-neighbors", type=int, default=15,
+                        help="UMAP n_neighbors (default: 15)")
+    parser.add_argument("--cluster-before-umap", action="store_true",
+                        help="Cluster in high-D activation space instead of 2D UMAP embedding. "
+                             "Uses PCA to --pre-cluster-dims first, then HDBSCAN, then UMAP for viz only.")
+    parser.add_argument("--pre-cluster-dims", type=int, default=30,
+                        help="PCA dimensions before clustering when --cluster-before-umap (default: 30)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output directory (default: auto-named under analysis_results/)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    args = parser.parse_args()
+
+    data_dir = Path(args.data_dir)
+    records, total_datapoints = load_data(args.data_dir, subsample_rate=args.subsample)
+    if len(records) < args.hdbscan_min_cluster:
+        print(f"Only {len(records)} records after subsampling, need at least "
+              f"{args.hdbscan_min_cluster}. Try --subsample 1.")
+        return
+
+    # Auto-name output dir: analysis_results/policy-N-subM-cK
+    if args.output_dir is None:
+        policy_name = data_dir.name
+        dirname = (f"{policy_name}-{total_datapoints}"
+                   f"-sub{args.subsample}-c{args.hdbscan_min_cluster}"
+                   f"{f'-pca{args.pre_cluster_dims}' if args.cluster_before_umap else ''}")
+        output_dir = os.path.join("analysis_results", dirname)
+    else:
+        output_dir = args.output_dir
+
+    activations, features, metadata = compute_features(records)
+
+    print(f"\nActivations: {activations.shape}, Features: {features.shape}", flush=True)
+
+    if args.cluster_before_umap:
+        # Cluster in high-D: PCA denoise → HDBSCAN → UMAP for viz only
+        from sklearn.decomposition import PCA
+
+        pca_dims = min(args.pre_cluster_dims, activations.shape[1], activations.shape[0])
+        print(f"Running PCA to {pca_dims} dims for clustering...", flush=True)
+        pca = PCA(n_components=pca_dims, random_state=args.seed)
+        activations_reduced = pca.fit_transform(activations)
+        explained = pca.explained_variance_ratio_.sum()
+        print(f"  PCA explains {explained:.1%} of variance")
+
+        print(f"Running HDBSCAN on {pca_dims}-D PCA space...", flush=True)
+        labels, hdbscan_clusterer = run_hdbscan(activations_reduced,
+                                                min_cluster_size=args.hdbscan_min_cluster,
+                                                min_samples=args.hdbscan_min_samples)
+
+        print(f"Running UMAP for visualization only...", flush=True)
+        embedding, umap_reducer = run_umap(activations, n_neighbors=args.umap_neighbors,
+                                           random_state=args.seed)
+    else:
+        # Default: UMAP → HDBSCAN (cluster the 2D embedding)
+        print(f"Running UMAP on {activations.shape[0]} points...", flush=True)
+        embedding, umap_reducer = run_umap(activations, n_neighbors=args.umap_neighbors,
+                                           random_state=args.seed)
+        labels, hdbscan_clusterer = run_hdbscan(embedding,
+                                                min_cluster_size=args.hdbscan_min_cluster,
+                                                min_samples=args.hdbscan_min_samples)
+    stats = compute_cluster_stats(features, labels, metadata, rng_seed=args.seed)
+
+    print(f"\nWriting outputs to {output_dir}/")
+    generate_outputs(embedding, labels, features, stats, output_dir)
+
+    # Save fitted models and per-record label mapping for downstream use
+    # (e.g. agent_life_visualization.py can overlay cluster assignments)
+    import joblib
+    joblib.dump(umap_reducer, os.path.join(output_dir, "umap_model.pkl"))
+    joblib.dump(hdbscan_clusterer, os.path.join(output_dir, "hdbscan_model.pkl"))
+    if args.cluster_before_umap:
+        joblib.dump(pca, os.path.join(output_dir, "pca_model.pkl"))
+    # Save label mapping: (env_id, agent_id, step) -> cluster_label
+    label_records = np.column_stack([
+        metadata["env_id"], metadata["agent_id"], metadata["step"], labels
+    ])
+    np.save(os.path.join(output_dir, "cluster_labels.npy"), label_records)
+    print(f"  Wrote umap_model.pkl, hdbscan_model.pkl, cluster_labels.npy")
+
+    # Display plots inline if imgcat is available (e.g. iTerm2)
+    import shutil
+    if shutil.which("imgcat"):
+        import subprocess
+        for img in ["umap_scatter.png", "cluster_features.png"]:
+            img_path = os.path.join(output_dir, img)
+            subprocess.run(["imgcat", img_path], check=False)
+
+    print(f"\nDone.")
+
+
+if __name__ == "__main__":
+    main()
