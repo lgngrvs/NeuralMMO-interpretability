@@ -249,7 +249,107 @@ def feature_subspace_analysis(activations, features, labels):
     }
 
 
-def generate_report(pairwise_results, feature_results, output_dir):
+def mahalanobis_cosine_similarity(activations, labels):
+    """Compute pairwise Mahalanobis cosine similarity between cluster centroids.
+
+    Whitens the activation space using the pooled within-class covariance,
+    then computes cosine similarity between cluster centroid displacements
+    (mean_i - global_mean) in the whitened space. This accounts for correlated
+    and differently-scaled dimensions.
+
+    Returns dict with similarity matrix, whitened displacement vectors, and
+    top activation dimensions contributing to each cluster's identity.
+    """
+    from sklearn.decomposition import PCA
+
+    unique_labels = sorted(set(labels) - {-1})
+    n_clusters = len(unique_labels)
+    global_mean = activations.mean(axis=0)
+
+    # Pooled within-class covariance
+    S_W = np.zeros((activations.shape[1], activations.shape[1]))
+    cluster_masks = {}
+    for lab in unique_labels:
+        mask = labels == lab
+        cluster_masks[lab] = mask
+        centered = activations[mask] - activations[mask].mean(axis=0)
+        S_W += centered.T @ centered
+
+    # Whitening: need S_W^{-1/2}. Use PCA to handle rank deficiency.
+    # Eigendecompose S_W, invert the nonzero eigenvalues.
+    n_samples = sum(m.sum() for m in cluster_masks.values())
+    max_rank = min(activations.shape[1], n_samples - n_clusters)
+    pca = PCA(n_components=min(max_rank, activations.shape[1]))
+    pca.fit(activations)  # fit on all data to get stable basis
+
+    # Whitening transform: project into PCA space, scale by 1/sqrt(eigenvalue)
+    components = pca.components_  # (n_components, d)
+    explained_var = pca.explained_variance_  # (n_components,)
+    # Regularize to avoid dividing by near-zero variance
+    reg = 1e-6 * explained_var.max()
+    whitening_scale = 1.0 / np.sqrt(explained_var + reg)
+
+    # Compute displacements in whitened space
+    displacements = {}
+    displacements_raw = {}
+    for lab in unique_labels:
+        centroid = activations[cluster_masks[lab]].mean(axis=0)
+        delta = centroid - global_mean
+        displacements_raw[lab] = delta
+        # Project to PCA space and whiten
+        delta_pca = components @ delta  # (n_components,)
+        delta_whitened = delta_pca * whitening_scale
+        displacements[lab] = delta_whitened
+
+    # Cosine similarity matrix in whitened space
+    cosine_sim = np.zeros((n_clusters, n_clusters))
+    for i, la in enumerate(unique_labels):
+        for j, lb in enumerate(unique_labels):
+            da = displacements[la]
+            db = displacements[lb]
+            norm_a = np.linalg.norm(da)
+            norm_b = np.linalg.norm(db)
+            if norm_a < 1e-10 or norm_b < 1e-10:
+                cosine_sim[i, j] = 0.0
+            else:
+                cosine_sim[i, j] = np.dot(da, db) / (norm_a * norm_b)
+
+    # Also compute regular (non-whitened) cosine similarity for comparison
+    cosine_sim_raw = np.zeros((n_clusters, n_clusters))
+    for i, la in enumerate(unique_labels):
+        for j, lb in enumerate(unique_labels):
+            da = displacements_raw[la]
+            db = displacements_raw[lb]
+            norm_a = np.linalg.norm(da)
+            norm_b = np.linalg.norm(db)
+            if norm_a < 1e-10 or norm_b < 1e-10:
+                cosine_sim_raw[i, j] = 0.0
+            else:
+                cosine_sim_raw[i, j] = np.dot(da, db) / (norm_a * norm_b)
+
+    # Top activation dimensions per cluster: which neurons contribute most
+    # to the whitened displacement?
+    top_dims_per_cluster = {}
+    for lab in unique_labels:
+        # Map whitened displacement back to original space for interpretability
+        delta_whitened = displacements[lab]
+        # Contribution of each original dimension: sum of |whitened_pca_j * component_j_i|
+        # across PCA components j, for original dimension i
+        contrib = np.abs((delta_whitened[:, None] * components)).sum(axis=0)  # (d,)
+        top_idx = np.argsort(contrib)[::-1][:20]
+        top_dims_per_cluster[lab] = list(zip(top_idx.tolist(),
+                                             contrib[top_idx].tolist()))
+
+    return {
+        "cluster_labels": unique_labels,
+        "cosine_sim_whitened": cosine_sim,
+        "cosine_sim_raw": cosine_sim_raw,
+        "top_dims_per_cluster": top_dims_per_cluster,
+        "displacements_whitened": displacements,
+    }
+
+
+def generate_report(pairwise_results, feature_results, mahal_results, output_dir):
     """Generate text report and plots."""
     import matplotlib
     matplotlib.use("Agg")
@@ -320,6 +420,43 @@ def generate_report(pairwise_results, feature_results, output_dir):
             for k in range(min(8, len(res['accuracy_curve']))):
                 bar = "█" * int(res['accuracy_curve'][k] * 40)
                 f.write(f"    k={k:2d}: {res['accuracy_curve'][k]:.3f}  {bar}\n")
+
+        # Mahalanobis cosine similarity
+        f.write("\n\nMahalanobis Cosine Similarity (whitened displacement vectors):\n")
+        f.write("=" * 60 + "\n")
+        f.write("  Cosine similarity of (cluster_mean - global_mean) in whitened space.\n")
+        f.write("  +1 = clusters deviate from the mean in the same direction.\n")
+        f.write("   0 = orthogonal deviations.  -1 = opposite directions.\n\n")
+
+        m_labels = mahal_results["cluster_labels"]
+        f.write(f"  {'Whitened':>10s}")
+        for lab in m_labels:
+            f.write(f"  C{lab:>5d}")
+        f.write("\n")
+        for i, la in enumerate(m_labels):
+            f.write(f"  C{la:<8d}")
+            for j in range(len(m_labels)):
+                f.write(f"  {mahal_results['cosine_sim_whitened'][i, j]:+6.3f}")
+            f.write("\n")
+
+        f.write(f"\n  {'Raw':>10s}")
+        for lab in m_labels:
+            f.write(f"  C{lab:>5d}")
+        f.write("\n")
+        for i, la in enumerate(m_labels):
+            f.write(f"  C{la:<8d}")
+            for j in range(len(m_labels)):
+                f.write(f"  {mahal_results['cosine_sim_raw'][i, j]:+6.3f}")
+            f.write("\n")
+
+        # Top activation dimensions per cluster
+        f.write("\n\nTop Activation Dimensions per Cluster (whitened displacement):\n")
+        f.write("-" * 60 + "\n")
+        for lab in m_labels:
+            f.write(f"\nC{lab}:\n")
+            f.write(f"  {'Rank':>4s}  {'Dim':>5s}  {'Contrib':>8s}\n")
+            for rank, (dim, contrib) in enumerate(mahal_results["top_dims_per_cluster"][lab][:10]):
+                f.write(f"  {rank+1:4d}  {dim:5d}  {contrib:8.3f}\n")
 
     print(f"  Wrote {report_path}")
 
@@ -424,10 +561,47 @@ def generate_report(pairwise_results, feature_results, output_dir):
     plt.close(fig)
     print(f"  Wrote {eig_path}")
 
+    # --- Plot 4: Mahalanobis cosine similarity heatmaps ---
+    m_labels = mahal_results["cluster_labels"]
+    n_m = len(m_labels)
+    m_tick_labels = [f"C{l}" for l in m_labels]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    im1 = ax1.imshow(mahal_results['cosine_sim_raw'], cmap='RdBu_r', vmin=-1, vmax=1)
+    ax1.set_xticks(range(n_m)); ax1.set_xticklabels(m_tick_labels)
+    ax1.set_yticks(range(n_m)); ax1.set_yticklabels(m_tick_labels)
+    ax1.set_title("Raw Cosine Similarity\n(centroid displacements)")
+    fig.colorbar(im1, ax=ax1)
+    for i in range(n_m):
+        for j in range(n_m):
+            ax1.text(j, i, f"{mahal_results['cosine_sim_raw'][i,j]:+.2f}",
+                    ha='center', va='center', fontsize=8,
+                    color='white' if abs(mahal_results['cosine_sim_raw'][i,j]) > 0.6 else 'black')
+
+    im2 = ax2.imshow(mahal_results['cosine_sim_whitened'], cmap='RdBu_r', vmin=-1, vmax=1)
+    ax2.set_xticks(range(n_m)); ax2.set_xticklabels(m_tick_labels)
+    ax2.set_yticks(range(n_m)); ax2.set_yticklabels(m_tick_labels)
+    ax2.set_title("Mahalanobis Cosine Similarity\n(whitened displacements)")
+    fig.colorbar(im2, ax=ax2)
+    for i in range(n_m):
+        for j in range(n_m):
+            ax2.text(j, i, f"{mahal_results['cosine_sim_whitened'][i,j]:+.2f}",
+                    ha='center', va='center', fontsize=8,
+                    color='white' if abs(mahal_results['cosine_sim_whitened'][i,j]) > 0.6 else 'black')
+
+    fig.suptitle("Cluster Displacement Cosine Similarity\n(+1 = same deviation direction from global mean)",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    mahal_path = os.path.join(output_dir, "mahalanobis_cosine.png")
+    fig.savefig(mahal_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {mahal_path}")
+
     import shutil
     if shutil.which("imgcat"):
         import subprocess
-        for img in [acc_path, dist_path, eig_path]:
+        for img in [acc_path, dist_path, eig_path, mahal_path]:
             subprocess.run(["imgcat", img], check=False)
 
 
@@ -482,10 +656,14 @@ def main():
     feature_results = feature_subspace_analysis(
         activations_clean, features_clean, labels_clean)
 
+    # Mahalanobis cosine similarity
+    print(f"\nComputing Mahalanobis cosine similarity...")
+    mahal_results = mahalanobis_cosine_similarity(activations_clean, labels_clean)
+
     # Generate report
     output_dir = args.output_dir or str(cluster_dir / "fisher")
     print(f"\nWriting outputs to {output_dir}/")
-    generate_report(pairwise_results, feature_results, output_dir)
+    generate_report(pairwise_results, feature_results, mahal_results, output_dir)
     print("\nDone.")
 
 
