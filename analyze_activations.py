@@ -439,6 +439,185 @@ def generate_outputs(embedding, labels, features, stats, output_dir):
     print(f"  Wrote {feat_path}")
 
 
+def generate_dendrogram_explorer(clusterer, embedding, output_dir, n_frames=75):
+    """Generate interactive Plotly HTML for exploring HDBSCAN's condensed tree hierarchy.
+
+    Precomputes cluster assignments at sampled lambda (1/distance) thresholds from
+    the condensed tree and renders them as a Plotly slider over fixed UMAP coordinates.
+    Low lambda = few broad clusters; high lambda = many fine-grained clusters + more noise.
+    """
+    import colorsys
+
+    import plotly.graph_objects as go
+
+    tree_df = clusterer.condensed_tree_.to_pandas()
+    n_points = embedding.shape[0]
+
+    # --- Build cluster hierarchy from condensed tree ---
+    is_cluster_event = tree_df["child_size"] > 1
+    cluster_tree = tree_df[is_cluster_event]
+    point_tree = tree_df[~is_cluster_event]
+
+    # parent -> [(child_cluster, birth_lambda)]
+    cluster_children = defaultdict(list)
+    cluster_birth = {}
+    for _, row in cluster_tree.iterrows():
+        parent, child = int(row["parent"]), int(row["child"])
+        lam = row["lambda_val"]
+        cluster_children[parent].append((child, lam))
+        cluster_birth[child] = lam
+
+    root = int(tree_df["parent"].min())
+    cluster_birth[root] = 0.0
+
+    # Point info: which cluster each point lives in and when it falls out
+    point_home = {}
+    point_lambda = {}
+    for _, row in point_tree.iterrows():
+        pid = int(row["child"])
+        point_home[pid] = int(row["parent"])
+        point_lambda[pid] = row["lambda_val"]
+
+    # Cluster parent map (child -> parent) for ancestor walks
+    cluster_parent_map = {}
+    for _, row in cluster_tree.iterrows():
+        cluster_parent_map[int(row["child"])] = int(row["parent"])
+
+    def get_ancestors(cid):
+        path = [cid]
+        while cid in cluster_parent_map:
+            cid = cluster_parent_map[cid]
+            path.append(cid)
+        return path
+
+    ancestor_cache = {c: get_ancestors(c) for c in cluster_birth}
+
+    # Pre-cache each point's ancestor chain (via its home cluster)
+    point_ancestors = {}
+    for pid in range(n_points):
+        if pid in point_home:
+            point_ancestors[pid] = ancestor_cache[point_home[pid]]
+
+    # --- Sample lambda values across the condensed tree's range ---
+    lam_min = tree_df["lambda_val"].min()
+    lam_max = tree_df["lambda_val"].max()
+    sampled_lambdas = np.linspace(lam_min, lam_max, n_frames)
+
+    def get_active_clusters(lambda_cut):
+        """Return the set of cluster IDs that are 'leaves' of the tree at this lambda."""
+        active = set()
+
+        def recurse(cid):
+            born_children = [
+                (c, l) for c, l in cluster_children.get(cid, []) if l <= lambda_cut
+            ]
+            if not born_children:
+                active.add(cid)
+            else:
+                for c, _l in born_children:
+                    recurse(c)
+
+        recurse(root)
+        return active
+
+    # --- Precompute assignments at each sampled lambda ---
+    with spinner("Precomputing dendrogram frames"):
+        all_active_ids = set()
+        frame_data = []
+
+        for lam in sampled_lambdas:
+            active = get_active_clusters(lam)
+            all_active_ids.update(active)
+
+            labels = np.full(n_points, -1, dtype=int)
+            for pid in range(n_points):
+                if pid not in point_ancestors:
+                    continue
+                if point_lambda[pid] <= lam:
+                    continue  # point fell out → noise
+                for anc in point_ancestors[pid]:
+                    if anc in active:
+                        labels[pid] = anc
+                        break
+
+            n_clusters = len(set(labels[labels >= 0]))
+            n_noise = int((labels == -1).sum())
+            frame_data.append((lam, labels, n_clusters, n_noise))
+
+    # --- Assign stable colors to cluster IDs ---
+    sorted_cids = sorted(all_active_ids)
+    palette = {}
+    for i, cid in enumerate(sorted_cids):
+        hue = i / max(len(sorted_cids), 1)
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.85)
+        palette[cid] = (int(r * 255), int(g * 255), int(b * 255))
+
+    def labels_to_colors(labels):
+        colors = []
+        for l in labels:
+            if l == -1:
+                colors.append("rgba(180,180,180,0.15)")
+            else:
+                r, g, b = palette.get(l, (128, 128, 128))
+                colors.append(f"rgba({r},{g},{b},0.7)")
+        return colors
+
+    # --- Build Plotly figure with slider ---
+    with spinner("Building Plotly HTML"):
+        initial_colors = labels_to_colors(frame_data[0][1])
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=embedding[:, 0].tolist(),
+                y=embedding[:, 1].tolist(),
+                mode="markers",
+                marker=dict(color=initial_colors, size=3, line=dict(width=0)),
+                hoverinfo="skip",
+            )
+        )
+
+        steps = []
+        for i, (lam, labels, nc, nn) in enumerate(frame_data):
+            noise_pct = nn / n_points * 100
+            colors = labels_to_colors(labels)
+            steps.append(
+                dict(
+                    method="restyle",
+                    args=[{"marker.color": [colors]}],
+                    label=f"\u03bb={lam:.4f} \u2014 {nc} clusters, {noise_pct:.0f}% noise",
+                )
+            )
+
+        fig.update_layout(
+            sliders=[
+                dict(
+                    active=0,
+                    steps=steps,
+                    currentvalue=dict(visible=True, xanchor="center"),
+                    pad=dict(t=40),
+                    len=0.9,
+                    x=0.05,
+                )
+            ],
+            title=dict(
+                text="Dendrogram Explorer \u2014 HDBSCAN Condensed Tree on UMAP",
+                x=0.5,
+            ),
+            xaxis_title="UMAP 1",
+            yaxis_title="UMAP 2",
+            width=950,
+            height=700,
+            template="plotly_white",
+            showlegend=False,
+        )
+
+        html_path = os.path.join(output_dir, "dendrogram_explorer.html")
+        fig.write_html(html_path, include_plotlyjs=True)
+
+    print(f"  Wrote {html_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Cluster activation vectors and analyze behavioral modes")
@@ -457,6 +636,10 @@ def main():
                              "Uses PCA to --pre-cluster-dims first, then HDBSCAN, then UMAP for viz only.")
     parser.add_argument("--pre-cluster-dims", type=int, default=30,
                         help="PCA dimensions before clustering when --cluster-before-umap (default: 30)")
+    parser.add_argument("--dendrogram-explorer", action="store_true",
+                        help="Generate interactive Plotly HTML for scrubbing through HDBSCAN's "
+                             "condensed tree hierarchy on the UMAP scatter. "
+                             "Requires --cluster-before-umap.")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: auto-named under analysis_results/)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -515,6 +698,12 @@ def main():
     print(f"\nWriting outputs to {output_dir}/")
     generate_outputs(embedding, labels, features, stats, output_dir)
 
+    if args.dendrogram_explorer:
+        if not args.cluster_before_umap:
+            print("ERROR: --dendrogram-explorer requires --cluster-before-umap")
+            sys.exit(1)
+        generate_dendrogram_explorer(hdbscan_clusterer, embedding, output_dir)
+
     # Save fitted models and per-record label mapping for downstream use
     # (e.g. agent_life_visualization.py can overlay cluster assignments)
     import joblib
@@ -530,12 +719,15 @@ def main():
     print(f"  Wrote umap_model.pkl, hdbscan_model.pkl, cluster_labels.npy")
 
     # Display plots inline if imgcat is available (e.g. iTerm2)
-    import shutil
-    if shutil.which("imgcat"):
-        import subprocess
-        for img in ["umap_scatter.png", "cluster_features.png"]:
-            img_path = os.path.join(output_dir, img)
-            subprocess.run(["imgcat", img_path], check=False)
+    import subprocess
+    for img in ["umap_scatter.png", "cluster_features.png"]:
+        img_path = os.path.join(output_dir, img)
+        try:
+            result = subprocess.run(["imgcat", img_path], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"  imgcat {img} failed (exit {result.returncode}): {result.stderr.strip()}")
+        except FileNotFoundError:
+            break  # imgcat not installed, skip remaining images
 
     print(f"\nDone.")
 

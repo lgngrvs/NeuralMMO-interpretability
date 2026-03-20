@@ -22,6 +22,16 @@ dependencies = [
     "torch>2",
     "transformers",
     "wandb",
+    "orjson>=3.11.7",
+    "umap-learn>=0.5.11",
+    "numpy",
+    "tqdm",
+    "hdbscan",
+    "matplotlib",
+    "scikit-learn",
+    "joblib",
+    "ijson",
+    "plotly>=5.0",
 ]
 
 [project.optional-dependencies]
