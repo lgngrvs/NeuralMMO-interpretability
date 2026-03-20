@@ -168,10 +168,21 @@ PANELS = [
     },
     {
         "title": "Actions",
+        "type": "actions",
         "features": ["is_moving", "is_attacking", "is_trading"],
         "colors": ["#3498db", "#c0392b", "#1abc9c"],
     },
 ]
+
+ROLLING_WINDOW = 20  # ticks for rolling average smoothing
+
+
+def _rolling_mean(values, window):
+    """Compute rolling mean with same-length output (edges use smaller windows)."""
+    kernel = np.ones(window) / window
+    # Pad to get same-length output
+    padded = np.pad(values, (window // 2, window - 1 - window // 2), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
 
 
 def _plot_panel(ax, panel, x_axis, feature_series):
@@ -202,6 +213,32 @@ def _plot_panel(ax, panel, x_axis, feature_series):
         h2, l2 = ax2.get_legend_handles_labels()
         ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=7)
         return
+    ax.legend(loc="upper right", fontsize=7)
+
+
+def _plot_actions_panel(ax, panel, x_axis, feature_series):
+    """Draw binary action features as stacked lanes with rolling average."""
+    features = panel["features"]
+    colors = panel["colors"]
+    n_feats = len(features)
+
+    for i, (feat_name, color) in enumerate(zip(features, colors)):
+        values = np.array([f[feat_name] for f in feature_series], dtype=float)
+        smoothed = _rolling_mean(values, ROLLING_WINDOW)
+        # Each feature gets its own lane: i=0 at top, i=n-1 at bottom
+        offset = (n_feats - 1 - i)
+        # Raw values as faded fill
+        ax.fill_between(x_axis, offset, offset + values, alpha=0.15, color=color, step="mid")
+        # Smoothed line in full opacity
+        ax.plot(x_axis, offset + smoothed, color=color, linewidth=1.5, alpha=0.9,
+                label=feat_name)
+        # Thin divider line at base of each lane
+        ax.axhline(offset, color="#cccccc", linewidth=0.5, zorder=0)
+
+    ax.axhline(n_feats, color="#cccccc", linewidth=0.5, zorder=0)
+    ax.set_ylim(-0.05, n_feats + 0.05)
+    ax.set_yticks([i + 0.5 for i in range(n_feats)])
+    ax.set_yticklabels(list(reversed(features)), fontsize=7)
     ax.legend(loc="upper right", fontsize=7)
 
 
@@ -244,7 +281,7 @@ def _plot_cluster_panel(ax, x_axis, cluster_labels):
         ax.set_yticks([])
         return
 
-    cmap = plt.cm.get_cmap("tab10", max(max(unique_clusters) + 1, 1))
+    cmap = matplotlib.colormaps.get_cmap("tab10").resampled(max(max(unique_clusters) + 1, 1))
 
     # Draw colored spans for contiguous runs of the same cluster
     from itertools import groupby
@@ -281,9 +318,16 @@ def plot_agent(feature_series, steps, target_key, cluster_labels, data_name, out
 
     lives_feats, lives_steps, lives_clusters = split_into_lives(
         feature_series, steps, cluster_labels)
+    # Filter out lives with fewer than 10 ticks
+    filtered = [(f, s, c) for f, s, c in zip(lives_feats, lives_steps, lives_clusters)
+                if len(f) >= 10]
+    if not filtered:
+        print(f"    All lives < 10 ticks, skipping")
+        return None
+    lives_feats, lives_steps, lives_clusters = zip(*filtered)
     n_lives = len(lives_feats)
     if n_lives > 1:
-        print(f"    {n_lives} lives detected")
+        print(f"    {n_lives} lives detected (after filtering short lives)")
 
     panels = list(PANELS)
     has_clusters = cluster_labels is not None
@@ -312,9 +356,12 @@ def plot_agent(feature_series, steps, target_key, cluster_labels, data_name, out
         for row, panel in enumerate(panels):
             ax = axes[row, col]
 
-            if panel.get("type") == "cluster":
+            ptype = panel.get("type")
+            if ptype == "cluster":
                 if lc is not None:
                     _plot_cluster_panel(ax, ticks, lc)
+            elif ptype == "actions":
+                _plot_actions_panel(ax, panel, ticks, lf)
             else:
                 _plot_panel(ax, panel, ticks, lf)
 
@@ -323,12 +370,16 @@ def plot_agent(feature_series, steps, target_key, cluster_labels, data_name, out
 
             # Row labels on leftmost column only
             if col == 0:
-                if not panel.get("type") == "cluster":
+                if ptype not in ("cluster", "actions"):
                     ax.set_ylabel(panel["title"], fontsize=9, fontweight="bold")
+                elif ptype == "actions":
+                    ax.set_ylabel("Actions", fontsize=9, fontweight="bold")
                 # cluster panel sets its own ylabel in _plot_cluster_panel
             else:
-                if not panel.get("type") == "cluster":
+                if ptype not in ("cluster",):
                     ax.set_ylabel("")
+                if ptype == "actions":
+                    ax.set_yticklabels([])
                 ax.tick_params(axis="y", labelleft=False)
 
             # Column titles on top row
@@ -341,7 +392,7 @@ def plot_agent(feature_series, steps, target_key, cluster_labels, data_name, out
 
         # Share y-limits across columns for each row
     for row in range(n_rows):
-        if panels[row].get("type") == "cluster":
+        if panels[row].get("type") in ("cluster", "actions"):
             continue
         all_ylims = [axes[row, c].get_ylim() for c in range(n_cols)]
         ymin = min(lo for lo, hi in all_ylims)
@@ -416,10 +467,14 @@ def main():
               f"agent_id={selected[0][0][1]}, lifespan={selected[0][1]}")
     else:
         rng = random.Random(args.seed)
-        k = min(args.num_agents, total_agents)
-        selected = rng.sample(sorted_trajs, k)
+        # Sample from the top 50% by trajectory length
+        top_half_start = total_agents // 2
+        top_half = sorted_trajs[top_half_start:]
+        k = min(args.num_agents, len(top_half))
+        selected = rng.sample(top_half, k)
         selected.sort(key=lambda x: x[1])  # sort by lifespan for output naming
-        print(f"  Randomly sampled {k} agents (seed={args.seed})")
+        print(f"  Randomly sampled {k} agents from top 50% by lifespan "
+              f"(>={top_half[0][1]} records, seed={args.seed})")
 
     # Build set of target keys for Phase 2
     target_keys = {key for key, _ in selected}
@@ -475,9 +530,9 @@ def main():
                 feature_series.append(feats)
                 steps.append(r["step"])
 
-        if not feature_series:
+        if len(feature_series) < 10:
             print(f"  Skipping agent env_id={agent_key[0]}, agent_id={agent_key[1]}: "
-                  f"no alive ticks")
+                  f"only {len(feature_series)} alive ticks")
             continue
 
         # Cluster labels for this agent
@@ -501,9 +556,11 @@ def main():
         else:
             out_path = str(output_dir / f"agent-{rank}-of-{total_agents}.png")
 
-        plot_agent(feature_series, steps, agent_key, cluster_labels,
-                   data_dir.name, out_path,
-                   lifespan_rank=rank, total_agents=total_agents)
+        result = plot_agent(feature_series, steps, agent_key, cluster_labels,
+                            data_dir.name, out_path,
+                            lifespan_rank=rank, total_agents=total_agents)
+        if result is None:
+            continue
         saved_paths.append(out_path)
         print(f"  Saved: {out_path}")
 
