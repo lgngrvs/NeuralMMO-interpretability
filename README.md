@@ -69,3 +69,101 @@ This generates 10 results json files in the same directory (by using `-r 10`), e
 ```
 python analysis/proc_eval_result.py policies
 ```
+
+## Interpretability Tools
+
+A pipeline for extracting, clustering, and analyzing hidden-state activations from trained policies. The typical workflow is:
+
+1. Extract activations from a trained policy
+2. Cluster and analyze the activation space
+3. Visualize agent behavior and cluster structure
+
+### 1. Extract Activations (`extract_activations.py`)
+
+Records per-timestep hidden-state activations from the action decoder, along with observations and actions, during policy evaluation.
+
+```bash
+# Extract from a single policy
+python extract_activations.py pve -p takeru -o activation_data
+
+# List available policies
+python extract_activations.py --list
+
+# Quick smoke test
+python extract_activations.py --smoke-test
+```
+
+Outputs a directory per policy under `activation_data/` containing `activations.json` with per-timestep records of activations, observations, and actions.
+
+### 2. Analyze Activations (`analyze_activations.py`)
+
+Clusters activation vectors using UMAP + HDBSCAN and tests whether clusters correspond to interpretable behavioral features. Computes Cohen's d effect sizes vs random baselines, checks for temporal/agent confounds, and generates multiple visualization modes.
+
+```bash
+# Standard clustering analysis
+python analyze_activations.py activation_data/takeru_200M --subsample 10
+
+# High-D clustering: PCA first, then HDBSCAN, then UMAP for viz
+python analyze_activations.py activation_data/takeru_200M \
+    --cluster-before-umap --pre-cluster-dims 30
+
+# PCA-feature correlation analysis only (fast, no UMAP/HDBSCAN)
+python analyze_activations.py activation_data/takeru_200M \
+    --metric-only --cluster-before-umap --pre-cluster-dims 30
+
+# All visualization modes
+python analyze_activations.py activation_data/takeru_200M \
+    --cluster-before-umap --pre-cluster-dims 30 \
+    --feature-scatter --umap-pairs --dendrogram-explorer
+```
+
+**Behavioral features tracked** (14 total): `n_visible_entities`, `n_visible_npcs`, `n_visible_players`, `self_health`, `self_food`, `self_water`, `self_gold`, `max_combat_level`, `in_combat`, `n_inventory_items`, `tick`, `is_moving`, `is_attacking`, `is_trading`.
+
+**Visualization modes:**
+
+| Flag | Output | Description |
+|------|--------|-------------|
+| *(default)* | `umap_scatter.png` | UMAP embedding colored by HDBSCAN cluster |
+| *(default)* | `cluster_features.png` | Heatmap of Cohen's d per feature per cluster |
+| *(default)* | `umap_metric_scatter.png` | UMAP colored by rolling-average feature values (opacity-scaled) |
+| `--cluster-before-umap` | `pca_pairs.png` | PCA direction pair plots (PC1&2, PC3&4, ...) |
+| `--cluster-before-umap` | `pca_feature_correlations.png` | Heatmap of Pearson r between PCs and features, with multivariate R² |
+| `--cluster-before-umap` | `pca_feature_profiles.png` | Per-feature scatter + binned mean profiles along top 3 correlated PCs |
+| `--feature-scatter` | `feature_scatter.png` | All 91 feature-pair scatter matrix |
+| `--umap-pairs` | `umap_pairs.png` | N-D UMAP direction pair plots on raw activations |
+| `--dendrogram-explorer` | `dendrogram_explorer.html` | Interactive Plotly slider over HDBSCAN condensed tree hierarchy |
+
+**Key options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--subsample N` | 10 | Keep every Nth record per trajectory |
+| `--hdbscan-min-cluster` | 15 | HDBSCAN min_cluster_size |
+| `--umap-neighbors` | 15 | UMAP n_neighbors |
+| `--pre-cluster-dims` | 30 | PCA dimensions before clustering |
+| `--umap-pairs-dims` | 10 | Number of UMAP dimensions for pairs plot |
+| `--metric-only` | off | Skip HDBSCAN and 2D UMAP; still runs PCA if `--cluster-before-umap` |
+
+### 3. Agent Life Visualization (`agent_life_visualization.py`)
+
+Plots per-agent timelines showing health, food, water, combat level, inventory, and actions over the agent's lifespan. Optionally overlays cluster assignments.
+
+```bash
+# Visualize the p75-lifespan agent
+python agent_life_visualization.py activation_data/takeru_200M
+
+# Sample 5 random agents, with cluster overlay
+python agent_life_visualization.py activation_data/takeru_200M \
+    --num_agents 5 --cluster_dir analysis_results/run_dir \
+    --output agent_plots/
+```
+
+### 4. Cluster Life Phase Analysis (`cluster_life_phase.py`)
+
+Checks whether cluster assignments follow a life-phase pattern (e.g. early-game vs late-game behavior). Bins each agent's lifespan into phases and plots the cluster distribution across phases as a stacked area chart.
+
+```bash
+python cluster_life_phase.py activation_data/takeru_200M \
+    --cluster-dir analysis_results/run_dir \
+    --n-bins 20 --min-lifespan 50
+```
