@@ -133,6 +133,40 @@ python analyze_activations.py activation_data/takeru_200M \
 | `--umap-pairs` | `umap_pairs.png` | N-D UMAP direction pair plots on raw activations |
 | `--dendrogram-explorer` | `dendrogram_explorer.html` | Interactive Plotly slider over HDBSCAN condensed tree hierarchy |
 
+**Example outputs** (takeru 200M policy, 30-D PCA, subsample=20):
+
+UMAP embedding colored by HDBSCAN cluster labels:
+
+![umap_scatter](docs/examples/umap_scatter.png)
+
+Cohen's d effect sizes per cluster — identifies which behavioral features distinguish each cluster from random baselines:
+
+![cluster_features](docs/examples/cluster_features.png)
+
+UMAP colored by rolling-average feature values (opacity = magnitude):
+
+![umap_metric_scatter](docs/examples/umap_metric_scatter.png)
+
+PCA-feature correlation heatmap with multivariate R² sidebar — shows which behavioral features are captured by each principal component:
+
+![pca_feature_correlations](docs/examples/pca_feature_correlations.png)
+
+Per-feature scatter + binned mean profiles along top 3 correlated PCs (axes synced so scatter maps directly onto trend line):
+
+![pca_feature_profiles](docs/examples/pca_feature_profiles.png)
+
+All 91 feature-pair scatter matrix (rolling averages):
+
+![feature_scatter](docs/examples/feature_scatter.png)
+
+10-D UMAP direction pair plots:
+
+![umap_pairs](docs/examples/umap_pairs.png)
+
+PCA direction pair plots:
+
+![pca_pairs](docs/examples/pca_pairs.png)
+
 **Key options:**
 
 | Option | Default | Description |
