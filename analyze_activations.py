@@ -22,6 +22,12 @@ from tqdm import tqdm
 # Entity observation column indices (from nmmo EntityState)
 ENT_ID = 0
 ENT_NPC_TYPE = 1
+ENT_ROW = 2
+ENT_COL = 3
+ENT_DAMAGE = 4
+ENT_TIME_ALIVE = 5
+ENT_FREEZE = 6
+ENT_ITEM_LEVEL = 7
 ENT_ATTACKER_ID = 8
 ENT_LATEST_COMBAT_TICK = 9
 ENT_GOLD = 11
@@ -31,6 +37,28 @@ ENT_WATER = 14
 ENT_MELEE_LVL = 15
 ENT_RANGE_LVL = 17
 ENT_MAGE_LVL = 19
+ENT_FISHING_LVL = 21
+ENT_HERBALISM_LVL = 23
+ENT_PROSPECTING_LVL = 25
+ENT_CARVING_LVL = 27
+ENT_ALCHEMY_LVL = 29
+
+# Tile observation column indices
+TILE_ROW = 0
+TILE_COL = 1
+TILE_MATERIAL = 2
+
+# Item/Inventory column indices
+ITEM_ID = 0
+ITEM_LEVEL = 3
+ITEM_EQUIPPED = 14
+ITEM_LISTED_PRICE = 15
+
+# Tile material IDs
+MAT_WATER = 1
+MAT_FOILAGE = 4  # forest canopy
+MAT_TREE = 9
+MAT_OCEAN = 14
 
 # Action indices in the flattened MultiDiscrete (alphabetical, Comm excluded)
 ACT_MOVE_DIR = 8
@@ -43,6 +71,8 @@ ACT_SELL_ITEM = 9
 ACT_SELL_NOOP = 12
 ACT_GIVE_ITEM = 4
 ACT_GIVE_NOOP = 12
+ACT_USE_ITEM = 11
+ACT_USE_NOOP = 12
 
 SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -72,20 +102,50 @@ def spinner(message):
 
 
 FEATURE_NAMES = [
+    # Nearby entities
     "n_visible_entities",
     "n_visible_npcs",
     "n_visible_players",
+    "nearest_entity_dist",
+    "nearest_player_dist",
+    # Self vitals
     "self_health",
     "self_food",
     "self_water",
     "self_gold",
+    # Combat
     "max_combat_level",
+    "melee_level",
+    "range_level",
+    "mage_level",
     "in_combat",
+    "self_damage",
+    # Harvest/profession skills
+    "fishing_level",
+    "herbalism_level",
+    "prospecting_level",
+    "carving_level",
+    "alchemy_level",
+    "max_harvest_level",
+    # Equipment & inventory
+    "item_level",
     "n_inventory_items",
+    "n_equipped_items",
+    "n_listed_items",
+    # Spatial
+    "self_row",
+    "self_col",
+    # Terrain around agent
+    "n_water_tiles",
+    "n_forest_tiles",
+    # Time
     "tick",
+    "time_alive",
+    # Actions
     "is_moving",
     "is_attacking",
     "is_trading",
+    "is_using_item",
 ]
 
 
@@ -169,6 +229,7 @@ def compute_features(records):
         action = r["action"]
         entity = np.array(obs["Entity"], dtype=np.float32)
         inventory = np.array(obs["Inventory"], dtype=np.float32)
+        tile = np.array(obs["Tile"], dtype=np.float32)
         current_tick = np.array(obs["CurrentTick"], dtype=np.float32).item()
         agent_id = r["agent_id"]
 
@@ -184,24 +245,74 @@ def compute_features(records):
         # Find self row
         self_mask = entity[:, ENT_ID] == agent_id
         if self_mask.any():
-            self_row = entity[self_mask][0]
-            self_health = self_row[ENT_HEALTH]
-            self_food = self_row[ENT_FOOD]
-            self_water = self_row[ENT_WATER]
-            self_gold = self_row[ENT_GOLD]
-            max_combat = max(self_row[ENT_MELEE_LVL], self_row[ENT_RANGE_LVL],
-                             self_row[ENT_MAGE_LVL])
-            in_combat = (self_row[ENT_ATTACKER_ID] != 0 or
-                         (current_tick - self_row[ENT_LATEST_COMBAT_TICK]) < 10)
+            self_ent = entity[self_mask][0]
+            self_health = self_ent[ENT_HEALTH]
+            self_food = self_ent[ENT_FOOD]
+            self_water = self_ent[ENT_WATER]
+            self_gold = self_ent[ENT_GOLD]
+            melee_lvl = self_ent[ENT_MELEE_LVL]
+            range_lvl = self_ent[ENT_RANGE_LVL]
+            mage_lvl = self_ent[ENT_MAGE_LVL]
+            max_combat = max(melee_lvl, range_lvl, mage_lvl)
+            in_combat = (self_ent[ENT_ATTACKER_ID] != 0 or
+                         (current_tick - self_ent[ENT_LATEST_COMBAT_TICK]) < 10)
+            self_damage = self_ent[ENT_DAMAGE]
+            self_r = self_ent[ENT_ROW]
+            self_c = self_ent[ENT_COL]
+            item_level = self_ent[ENT_ITEM_LEVEL]
+            time_alive = self_ent[ENT_TIME_ALIVE]
+            fishing_lvl = self_ent[ENT_FISHING_LVL]
+            herbalism_lvl = self_ent[ENT_HERBALISM_LVL]
+            prospecting_lvl = self_ent[ENT_PROSPECTING_LVL]
+            carving_lvl = self_ent[ENT_CARVING_LVL]
+            alchemy_lvl = self_ent[ENT_ALCHEMY_LVL]
+            max_harvest = max(fishing_lvl, herbalism_lvl, prospecting_lvl,
+                              carving_lvl, alchemy_lvl)
             # Don't count self as a visible player
             n_players = player_mask.sum() - 1
-        else:
-            self_health = self_food = self_water = self_gold = max_combat = 0
-            in_combat = False
-            n_players = player_mask.sum()
 
-        # Inventory: non-zero rows (check if any column is non-zero)
-        n_inv = (np.abs(inventory).sum(axis=1) > 0).sum()
+            # Nearest entity/player distances (Chebyshev)
+            if n_visible > 1:  # >1 because self is visible
+                others = visible_ents[visible_ents[:, ENT_ID] != agent_id]
+                if len(others) > 0:
+                    dists = np.maximum(np.abs(others[:, ENT_ROW] - self_r),
+                                       np.abs(others[:, ENT_COL] - self_c))
+                    nearest_entity_dist = dists.min()
+                    player_others = others[others[:, ENT_NPC_TYPE] == 0]
+                    nearest_player_dist = (
+                        np.maximum(np.abs(player_others[:, ENT_ROW] - self_r),
+                                   np.abs(player_others[:, ENT_COL] - self_c)).min()
+                        if len(player_others) > 0 else 99.0
+                    )
+                else:
+                    nearest_entity_dist = 99.0
+                    nearest_player_dist = 99.0
+            else:
+                nearest_entity_dist = 99.0
+                nearest_player_dist = 99.0
+        else:
+            self_health = self_food = self_water = self_gold = 0
+            melee_lvl = range_lvl = mage_lvl = max_combat = 0
+            in_combat = False
+            self_damage = 0
+            self_r = self_c = 0
+            item_level = time_alive = 0
+            fishing_lvl = herbalism_lvl = prospecting_lvl = 0
+            carving_lvl = alchemy_lvl = max_harvest = 0
+            n_players = player_mask.sum()
+            nearest_entity_dist = 99.0
+            nearest_player_dist = 99.0
+
+        # Inventory features
+        inv_mask = inventory[:, ITEM_ID] != 0
+        n_inv = inv_mask.sum()
+        n_equipped = (inventory[inv_mask, ITEM_EQUIPPED] > 0).sum() if n_inv > 0 else 0
+        n_listed = (inventory[inv_mask, ITEM_LISTED_PRICE] > 0).sum() if n_inv > 0 else 0
+
+        # Tile features: count terrain types in visible area
+        tile_mats = tile[:, TILE_MATERIAL]
+        n_water_tiles = ((tile_mats == MAT_WATER) | (tile_mats == MAT_OCEAN)).sum()
+        n_forest_tiles = ((tile_mats == MAT_FOILAGE) | (tile_mats == MAT_TREE)).sum()
 
         # Action features
         is_moving = action[ACT_MOVE_DIR] != ACT_MOVE_NOOP
@@ -209,12 +320,31 @@ def compute_features(records):
         is_trading = (action[ACT_BUY_ITEM] != ACT_BUY_NOOP or
                       action[ACT_SELL_ITEM] != ACT_SELL_NOOP or
                       action[ACT_GIVE_ITEM] != ACT_GIVE_NOOP)
+        is_using_item = action[ACT_USE_ITEM] != ACT_USE_NOOP
 
         features[i] = [
+            # Nearby entities
             n_visible, npc_mask.sum(), max(0, n_players),
-            self_health, self_food, self_water, self_gold, max_combat,
-            float(in_combat), n_inv, current_tick,
-            float(is_moving), float(is_attacking), float(is_trading),
+            nearest_entity_dist, nearest_player_dist,
+            # Self vitals
+            self_health, self_food, self_water, self_gold,
+            # Combat
+            max_combat, melee_lvl, range_lvl, mage_lvl,
+            float(in_combat), self_damage,
+            # Harvest/profession skills
+            fishing_lvl, herbalism_lvl, prospecting_lvl,
+            carving_lvl, alchemy_lvl, max_harvest,
+            # Equipment & inventory
+            item_level, n_inv, n_equipped, n_listed,
+            # Spatial
+            self_r, self_c,
+            # Terrain
+            n_water_tiles, n_forest_tiles,
+            # Time
+            current_tick, time_alive,
+            # Actions
+            float(is_moving), float(is_attacking),
+            float(is_trading), float(is_using_item),
         ]
 
     return activations, features, metadata

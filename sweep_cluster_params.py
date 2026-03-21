@@ -75,11 +75,16 @@ def score_combo(labels, features, metadata, min_trustworthy, seed=42):
             "passes_verification": False,
         }
 
-    # Remap non-surviving clusters to noise
+    # Remap: non-surviving → noise, surviving → 0,1,2,...
     filtered_labels = labels.copy()
     for l in unique_labels:
         if l not in surviving:
             filtered_labels[filtered_labels == l] = -1
+    # Renumber surviving clusters sequentially
+    remap = {old: new for new, old in enumerate(sorted(surviving))}
+    for old, new in remap.items():
+        filtered_labels[labels == old] = new
+    surviving = sorted(remap.values())
 
     stats = compute_cluster_stats(features, filtered_labels, metadata,
                                   n_baseline_samples=100, rng_seed=seed)
@@ -321,9 +326,9 @@ def main():
     # Sort by score descending
     results.sort(key=lambda x: x[0], reverse=True)
 
-    # Output
+    # Output — per-policy subdirectory so runs don't clobber each other
     policy_name = Path(args.data_dir).name
-    output_dir = "sweep_results"
+    output_dir = os.path.join("sweep_results", policy_name)
     os.makedirs(output_dir, exist_ok=True)
 
     if args.output is None:
