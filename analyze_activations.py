@@ -503,6 +503,185 @@ def generate_pca_pairs(activations_reduced, output_dir):
     print(f"  Wrote {path}")
 
 
+def generate_pca_feature_correlations(activations_reduced, rolling_features, pca,
+                                      output_dir):
+    """Compute and plot Pearson correlations between PCA component scores and features.
+
+    Produces a heatmap showing which behavioral features vary along each PCA axis.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_pcs = activations_reduced.shape[1]
+    n_features = len(FEATURE_NAMES)
+
+    # Pearson correlation matrix: (n_pcs, n_features)
+    corr = np.zeros((n_pcs, n_features))
+    for pc in range(n_pcs):
+        for f in range(n_features):
+            r = np.corrcoef(activations_reduced[:, pc], rolling_features[:, f])[0, 1]
+            corr[pc, f] = r
+
+    # Also compute R² per feature across all PCs (how much total PCA space captures each feature)
+    # via multiple regression: R² = 1 - SS_res/SS_tot
+    from numpy.linalg import lstsq
+    r_squared = np.zeros(n_features)
+    for f in range(n_features):
+        y = rolling_features[:, f]
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        if ss_tot < 1e-10:
+            continue
+        # OLS: y = X @ beta
+        coeffs, residuals, _, _ = lstsq(
+            np.column_stack([activations_reduced, np.ones(len(y))]),
+            y, rcond=None
+        )
+        y_pred = activations_reduced @ coeffs[:n_pcs] + coeffs[-1]
+        ss_res = np.sum((y - y_pred) ** 2)
+        r_squared[f] = 1 - ss_res / ss_tot
+
+    # --- Heatmap ---
+    # Show top 15 PCs max for readability
+    n_show = min(n_pcs, 15)
+    fig, (ax_heat, ax_r2) = plt.subplots(
+        1, 2, figsize=(14, max(4, n_show * 0.45)),
+        gridspec_kw={"width_ratios": [4, 1], "wspace": 0.05}
+    )
+
+    # Explained variance labels
+    evr = pca.explained_variance_ratio_
+    pc_labels = [f"PC{i+1} ({evr[i]:.1%})" for i in range(n_show)]
+
+    im = ax_heat.imshow(corr[:n_show], aspect="auto", cmap="RdBu_r", vmin=-1, vmax=1)
+    ax_heat.set_xticks(range(n_features))
+    ax_heat.set_xticklabels(FEATURE_NAMES, rotation=45, ha="right", fontsize=8)
+    ax_heat.set_yticks(range(n_show))
+    ax_heat.set_yticklabels(pc_labels, fontsize=8)
+    ax_heat.set_title("Pearson r: PC Score vs Rolling Feature", fontsize=11)
+
+    # Annotate cells with |r| > 0.1
+    for i in range(n_show):
+        for j in range(n_features):
+            val = corr[i, j]
+            if abs(val) > 0.1:
+                ax_heat.text(j, i, f"{val:.2f}", ha="center", va="center",
+                            fontsize=6, color="white" if abs(val) > 0.5 else "black")
+
+    fig.colorbar(im, ax=ax_heat, label="Pearson r", shrink=0.8)
+
+    # --- R² bar chart ---
+    bars = ax_r2.barh(range(n_features), r_squared, color="#8B4000", alpha=0.7)
+    ax_r2.set_yticks(range(n_features))
+    ax_r2.set_yticklabels(FEATURE_NAMES, fontsize=7)
+    ax_r2.set_xlabel("R² (all PCs)", fontsize=8)
+    ax_r2.set_title("Total PCA\nExplained", fontsize=9)
+    ax_r2.set_xlim(0, 1)
+    ax_r2.invert_yaxis()
+    for i, v in enumerate(r_squared):
+        ax_r2.text(v + 0.02, i, f"{v:.2f}", va="center", fontsize=6)
+
+    fig.tight_layout()
+    path = os.path.join(output_dir, "pca_feature_correlations.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {path}")
+
+    # Print a text summary of strong correlations
+    print("\n  PCA-Feature Correlation Summary:")
+    print(f"  {'Feature':25s} {'R²':>6s}  Top PC correlations")
+    print(f"  {'-'*25} {'-'*6}  {'-'*40}")
+    for f in range(n_features):
+        top_pcs = np.argsort(np.abs(corr[:, f]))[::-1][:3]
+        top_strs = [f"PC{pc+1}:{corr[pc,f]:+.2f}" for pc in top_pcs if abs(corr[pc, f]) > 0.05]
+        print(f"  {FEATURE_NAMES[f]:25s} {r_squared[f]:6.3f}  {', '.join(top_strs)}")
+
+    # --- Combined: scatter + binned profile for top 3 PCs, all features ---
+    # Layout: each feature gets 2 rows (scatter, profile) x 3 cols (top PCs)
+    n_bins = 20
+    top_k = 3
+    total_rows = n_features * 2
+    fig2, axes2 = plt.subplots(total_rows, top_k,
+                                figsize=(4.5 * top_k, 3.5 * n_features))
+
+    for i in range(n_features):
+        feat_vals = rolling_features[:, i]
+        top_pcs_i = np.argsort(np.abs(corr[:, i]))[::-1][:top_k]
+        row_scatter = i * 2
+        row_profile = i * 2 + 1
+
+        for rank, pc in enumerate(top_pcs_i):
+            pc_vals = activations_reduced[:, pc]
+            r_val = corr[pc, i]
+            ax_scatter = axes2[row_scatter, rank]
+            ax_profile = axes2[row_profile, rank]
+
+            # --- Scatter row ---
+            vmin, vmax = feat_vals.min(), feat_vals.max()
+            if vmax > vmin:
+                normed = (feat_vals - vmin) / (vmax - vmin)
+            else:
+                normed = np.zeros_like(feat_vals)
+            alphas = 0.05 + 0.5 * normed
+            sc_colors = np.zeros((len(feat_vals), 4))
+            sc_colors[:, 0] = 1.0 * (1 - normed) + 0.55 * normed
+            sc_colors[:, 1] = 0.9 * (1 - normed) + 0.25 * normed
+            sc_colors[:, 2] = 0.2 * (1 - normed) + 0.0 * normed
+            sc_colors[:, 3] = alphas
+
+            ax_scatter.scatter(pc_vals, feat_vals, c=sc_colors, s=1, rasterized=True)
+            ax_scatter.set_title(
+                f"{FEATURE_NAMES[i]} vs PC{pc+1} (r={r_val:+.2f}, r²={r_val**2:.2f})",
+                fontsize=8)
+            ax_scatter.set_ylabel(FEATURE_NAMES[i], fontsize=7)
+            ax_scatter.tick_params(labelsize=5)
+
+            # --- Profile row ---
+            bin_edges = np.percentile(pc_vals, np.linspace(0, 100, n_bins + 1))
+            bin_centers = []
+            bin_means = []
+            bin_sems = []
+            for b in range(n_bins):
+                lo, hi = bin_edges[b], bin_edges[b + 1]
+                if b == n_bins - 1:
+                    mask = (pc_vals >= lo) & (pc_vals <= hi)
+                else:
+                    mask = (pc_vals >= lo) & (pc_vals < hi)
+                if mask.sum() < 2:
+                    continue
+                bin_centers.append((lo + hi) / 2)
+                vals_in_bin = feat_vals[mask]
+                bin_means.append(vals_in_bin.mean())
+                bin_sems.append(vals_in_bin.std() / np.sqrt(mask.sum()))
+
+            bin_centers = np.array(bin_centers)
+            bin_means = np.array(bin_means)
+            bin_sems = np.array(bin_sems)
+
+            ax_profile.plot(bin_centers, bin_means, color="#8B4000", linewidth=2)
+            ax_profile.fill_between(bin_centers, bin_means - bin_sems,
+                                    bin_means + bin_sems, color="#8B4000", alpha=0.2)
+            ax_profile.set_xlabel(f"PC{pc+1} score", fontsize=7)
+            ax_profile.set_ylabel(f"mean {FEATURE_NAMES[i]}", fontsize=7)
+            ax_profile.tick_params(labelsize=5)
+
+            # Sync axes
+            xlim = ax_scatter.get_xlim()
+            ax_profile.set_xlim(xlim)
+            ylim = ax_scatter.get_ylim()
+            ax_profile.set_ylim(ylim)
+
+    fig2.suptitle("PCA Feature Profiles: Scatter (top) + Binned Mean ±SEM (bottom) per Feature",
+                  fontsize=14, y=1.005)
+    fig2.tight_layout()
+    path2 = os.path.join(output_dir, "pca_feature_profiles.png")
+    fig2.savefig(path2, dpi=150, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"  Wrote {path2}")
+
+    return corr, r_squared
+
+
 def generate_umap_pairs(activations, n_neighbors, seed, output_dir, n_components=10):
     """Run a 10D UMAP on raw activations and plot consecutive dimension pairs."""
     import matplotlib
@@ -891,19 +1070,21 @@ def main():
         embedding, umap_reducer = run_umap(activations, n_neighbors=args.umap_neighbors,
                                            random_state=args.seed)
 
-    # --- Run PCA + HDBSCAN if clustering requested ---
+    # --- Run PCA if requested ---
     labels = hdbscan_clusterer = pca = activations_reduced = None
+    if args.cluster_before_umap:
+        from sklearn.decomposition import PCA
+
+        pca_dims = min(args.pre_cluster_dims, activations.shape[1], activations.shape[0])
+        print(f"Running PCA to {pca_dims} dims...", flush=True)
+        pca = PCA(n_components=pca_dims, random_state=args.seed)
+        activations_reduced = pca.fit_transform(activations)
+        explained = pca.explained_variance_ratio_.sum()
+        print(f"  PCA explains {explained:.1%} of variance")
+
+    # --- Run HDBSCAN if not --metric-only ---
     if not args.metric_only:
         if args.cluster_before_umap:
-            from sklearn.decomposition import PCA
-
-            pca_dims = min(args.pre_cluster_dims, activations.shape[1], activations.shape[0])
-            print(f"Running PCA to {pca_dims} dims for clustering...", flush=True)
-            pca = PCA(n_components=pca_dims, random_state=args.seed)
-            activations_reduced = pca.fit_transform(activations)
-            explained = pca.explained_variance_ratio_.sum()
-            print(f"  PCA explains {explained:.1%} of variance")
-
             print(f"Running HDBSCAN on {pca_dims}-D PCA space...", flush=True)
             labels, hdbscan_clusterer = run_hdbscan(activations_reduced,
                                                     min_cluster_size=args.hdbscan_min_cluster,
@@ -938,6 +1119,9 @@ def main():
     if activations_reduced is not None:
         generate_pca_pairs(activations_reduced, output_dir)
         imgs.append("pca_pairs.png")
+        generate_pca_feature_correlations(activations_reduced, rolling_features, pca,
+                                          output_dir)
+        imgs += ["pca_feature_correlations.png", "pca_feature_profiles.png"]
 
     if args.umap_pairs:
         generate_umap_pairs(activations, args.umap_neighbors, args.seed,
