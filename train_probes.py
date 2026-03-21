@@ -1,6 +1,6 @@
 """Train linear probes to find directions in activation space for behavioral metrics.
 
-For each of the 14 features from analyze_activations.py, trains a linear probe
+For each feature from analyze_activations.py, trains a linear probe
 (ridge regression for continuous, logistic regression for binary) on the 256-dim
 activation vectors.  Evaluates on held-out *trajectories* to avoid temporal leakage.
 
@@ -24,7 +24,7 @@ from tqdm import tqdm
 from analyze_activations import FEATURE_NAMES, compute_features, load_data
 
 # Features that are binary (0/1) — use logistic regression
-BINARY_FEATURES = {"in_combat", "is_moving", "is_attacking", "is_trading"}
+BINARY_FEATURES = {"in_combat", "is_moving", "is_attacking", "is_trading", "is_using_item"}
 
 
 # ---------------------------------------------------------------------------
