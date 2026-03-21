@@ -145,7 +145,7 @@ def load_data(path, subsample_rate=10):
         # Sort each trajectory by step and subsample
         for key in tqdm(trajectories, desc="Subsampling trajectories", unit="traj"):
             traj = sorted(trajectories[key], key=lambda r: r["step"])
-            all_records.extend(traj[::subsample_rate])
+            all_records.extend(traj[::max(subsample_rate, 1)])
 
     print(f"Loaded {total_datapoints} records, {len(all_records)} after filtering + subsampling (rate={subsample_rate})")
     return all_records, total_datapoints
@@ -220,8 +220,9 @@ def compute_features(records):
     return activations, features, metadata
 
 
-def run_umap(activations, n_neighbors=15, min_dist=0.1, random_state=42):
-    """Reduce activations to 2D with UMAP.
+def run_umap(activations, n_neighbors=15, min_dist=0.1, n_components=2,
+             random_state=42):
+    """Reduce activations with UMAP.
 
     Returns (embedding, reducer) so the fitted UMAP model can be reused for
     projecting new points via reducer.transform().
@@ -230,7 +231,8 @@ def run_umap(activations, n_neighbors=15, min_dist=0.1, random_state=42):
     import umap
 
     reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist,
-                        n_components=2, random_state=random_state, verbose=True)
+                        n_components=n_components, random_state=random_state,
+                        verbose=True)
     # UMAP verbose=True writes progress bars to stderr (good) but also prints
     # epoch logs to stdout that arrive out of order. Suppress the stdout spam
     # and the n_jobs UserWarning.
@@ -343,15 +345,383 @@ def compute_cluster_stats(features, labels, metadata, n_baseline_samples=100,
     return stats
 
 
-def generate_outputs(embedding, labels, features, stats, output_dir):
-    """Generate summary text and plots."""
+def compute_rolling_features(features, metadata, window=5):
+    """Compute per-trajectory rolling averages of features.
+
+    Groups points by (env_id, agent_id), sorts by step within each group,
+    and applies an edge-padded rolling mean. Window is in subsampled steps.
+    Returns an array of the same shape as features with smoothed values.
+    """
+    rolling = np.copy(features)
+    # Group indices by trajectory
+    traj_indices = defaultdict(list)
+    for i in range(len(features)):
+        key = (int(metadata["env_id"][i]), int(metadata["agent_id"][i]))
+        traj_indices[key].append(i)
+
+    kernel = np.ones(window) / window
+    for key, indices in traj_indices.items():
+        # Sort by step within trajectory
+        indices = sorted(indices, key=lambda i: metadata["step"][i])
+        traj_feats = features[indices]  # (T, n_features)
+        for f in range(traj_feats.shape[1]):
+            vals = traj_feats[:, f]
+            if len(vals) < window:
+                # Too short for rolling, just keep raw
+                continue
+            padded = np.pad(vals, (window // 2, window - 1 - window // 2), mode="edge")
+            smoothed = np.convolve(padded, kernel, mode="valid")
+            for j, idx in enumerate(indices):
+                rolling[idx, f] = smoothed[j]
+
+    return rolling
+
+
+def generate_metric_umap(embedding, rolling_features, output_dir):
+    """Generate a grid of UMAP scatter plots colored by rolling-average feature values."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    os.makedirs(output_dir, exist_ok=True)
+    n_features = len(FEATURE_NAMES)
+    ncols = 2
+    nrows = (n_features + 1) // 2
+    fig, axes = plt.subplots(nrows, ncols, figsize=(10, 4 * nrows))
+    axes = axes.flatten()
 
-    # --- summary.txt ---
+    for i in range(n_features):
+        ax = axes[i]
+        vals = rolling_features[:, i]
+        # Normalize to [0, 1] for alpha mapping
+        vmin, vmax = vals.min(), vals.max()
+        if vmax > vmin:
+            normed = (vals - vmin) / (vmax - vmin)
+        else:
+            normed = np.zeros_like(vals)
+        alphas = 0.05 + 0.7 * normed  # range [0.05, 0.75]
+        # Interpolate color from yellow (low) to deep orange-brown (high)
+        colors = np.zeros((len(vals), 4))
+        colors[:, 0] = 1.0 * (1 - normed) + 0.55 * normed   # R: 1.0 → 0.55
+        colors[:, 1] = 0.9 * (1 - normed) + 0.25 * normed   # G: 0.9 → 0.25
+        colors[:, 2] = 0.2 * (1 - normed) + 0.0 * normed    # B: 0.2 → 0.0
+        colors[:, 3] = alphas
+        ax.scatter(embedding[:, 0], embedding[:, 1],
+                   c=colors, s=1, rasterized=True)
+        ax.set_title(FEATURE_NAMES[i], fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        # Opacity legend: a few reference alpha levels
+        from matplotlib.lines import Line2D
+        for level, label in [(0.0, f"{vmin:.1f}"), (0.5, f"{(vmin+vmax)/2:.1f}"), (1.0, f"{vmax:.1f}")]:
+            a = 0.05 + 0.7 * level
+            r = 1.0 * (1 - level) + 0.55 * level
+            g = 0.9 * (1 - level) + 0.25 * level
+            b = 0.2 * (1 - level) + 0.0 * level
+            ax.plot([], [], 'o', color=(r, g, b, a), markersize=5, label=label)
+        ax.legend(loc="upper right", fontsize=6, framealpha=0.5, handletextpad=0.3)
+
+    # Hide unused subplots
+    for i in range(n_features, len(axes)):
+        axes[i].set_visible(False)
+
+    fig.suptitle("UMAP Colored by Rolling-Average Feature Values", fontsize=14, y=1.01)
+    fig.tight_layout()
+    path = os.path.join(output_dir, "umap_metric_scatter.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {path}")
+
+
+def generate_feature_scatter(rolling_features, output_dir):
+    """Generate a triangular scatter matrix of all feature pairs."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_features = len(FEATURE_NAMES)
+    # Lower triangle pairs
+    pairs = [(i, j) for i in range(n_features) for j in range(i + 1, n_features)]
+    n_pairs = len(pairs)
+    ncols = 7
+    nrows = (n_pairs + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3 * ncols, 3 * nrows))
+    axes = axes.flatten()
+
+    for idx, (i, j) in enumerate(pairs):
+        ax = axes[idx]
+        ax.scatter(rolling_features[:, i], rolling_features[:, j],
+                   s=0.5, alpha=0.08, c="#8B4000", rasterized=True)
+        ax.set_xlabel(FEATURE_NAMES[i], fontsize=6)
+        ax.set_ylabel(FEATURE_NAMES[j], fontsize=6)
+        ax.tick_params(labelsize=5)
+
+    for idx in range(n_pairs, len(axes)):
+        axes[idx].set_visible(False)
+
+    fig.suptitle("Feature Pair Scatter (Rolling Averages)", fontsize=14, y=1.01)
+    fig.tight_layout()
+    path = os.path.join(output_dir, "feature_scatter.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {path}")
+
+
+def generate_pca_pairs(activations_reduced, output_dir):
+    """Generate scatter plots of consecutive PCA direction pairs (1&2, 3&4, ...)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+
+    n_dims = activations_reduced.shape[1]
+    n_pairs = n_dims // 2
+    ncols = min(4, n_pairs)
+    nrows = (n_pairs + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows))
+    if n_pairs == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+
+    for idx in range(n_pairs):
+        ax = axes[idx]
+        d1, d2 = idx * 2, idx * 2 + 1
+        # Compute point density for alpha via 2D histogram
+        x, y = activations_reduced[:, d1], activations_reduced[:, d2]
+        ax.scatter(x, y, s=0.5, alpha=0.08, c="#8B4000", rasterized=True)
+        ax.set_xlabel(f"PC {d1 + 1}", fontsize=8)
+        ax.set_ylabel(f"PC {d2 + 1}", fontsize=8)
+        ax.tick_params(labelsize=6)
+
+    for idx in range(n_pairs, len(axes)):
+        axes[idx].set_visible(False)
+
+    fig.suptitle("PCA Direction Pairs", fontsize=14, y=1.01)
+    fig.tight_layout()
+    path = os.path.join(output_dir, "pca_pairs.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {path}")
+
+
+def generate_pca_feature_correlations(activations_reduced, rolling_features, pca,
+                                      output_dir):
+    """Compute and plot Pearson correlations between PCA component scores and features.
+
+    Produces a heatmap showing which behavioral features vary along each PCA axis.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_pcs = activations_reduced.shape[1]
+    n_features = len(FEATURE_NAMES)
+
+    # Pearson correlation matrix: (n_pcs, n_features)
+    corr = np.zeros((n_pcs, n_features))
+    for pc in range(n_pcs):
+        for f in range(n_features):
+            r = np.corrcoef(activations_reduced[:, pc], rolling_features[:, f])[0, 1]
+            corr[pc, f] = r
+
+    # Also compute R² per feature across all PCs (how much total PCA space captures each feature)
+    # via multiple regression: R² = 1 - SS_res/SS_tot
+    from numpy.linalg import lstsq
+    r_squared = np.zeros(n_features)
+    for f in range(n_features):
+        y = rolling_features[:, f]
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        if ss_tot < 1e-10:
+            continue
+        # OLS: y = X @ beta
+        coeffs, residuals, _, _ = lstsq(
+            np.column_stack([activations_reduced, np.ones(len(y))]),
+            y, rcond=None
+        )
+        y_pred = activations_reduced @ coeffs[:n_pcs] + coeffs[-1]
+        ss_res = np.sum((y - y_pred) ** 2)
+        r_squared[f] = 1 - ss_res / ss_tot
+
+    # --- Heatmap ---
+    # Show top 15 PCs max for readability
+    n_show = min(n_pcs, 15)
+    fig, (ax_heat, ax_r2) = plt.subplots(
+        1, 2, figsize=(14, max(4, n_show * 0.45)),
+        gridspec_kw={"width_ratios": [4, 1], "wspace": 0.05}
+    )
+
+    # Explained variance labels
+    evr = pca.explained_variance_ratio_
+    pc_labels = [f"PC{i+1} ({evr[i]:.1%})" for i in range(n_show)]
+
+    im = ax_heat.imshow(corr[:n_show], aspect="auto", cmap="RdBu_r", vmin=-1, vmax=1)
+    ax_heat.set_xticks(range(n_features))
+    ax_heat.set_xticklabels(FEATURE_NAMES, rotation=45, ha="right", fontsize=8)
+    ax_heat.set_yticks(range(n_show))
+    ax_heat.set_yticklabels(pc_labels, fontsize=8)
+    ax_heat.set_title("Pearson r: PC Score vs Rolling Feature", fontsize=11)
+
+    # Annotate cells with |r| > 0.1
+    for i in range(n_show):
+        for j in range(n_features):
+            val = corr[i, j]
+            if abs(val) > 0.1:
+                ax_heat.text(j, i, f"{val:.2f}", ha="center", va="center",
+                            fontsize=6, color="white" if abs(val) > 0.5 else "black")
+
+    fig.colorbar(im, ax=ax_heat, label="Pearson r", shrink=0.8)
+
+    # --- R² bar chart ---
+    bars = ax_r2.barh(range(n_features), r_squared, color="#8B4000", alpha=0.7)
+    ax_r2.set_yticks(range(n_features))
+    ax_r2.set_yticklabels(FEATURE_NAMES, fontsize=7)
+    ax_r2.set_xlabel("R² (all PCs)", fontsize=8)
+    ax_r2.set_title("Total PCA\nExplained", fontsize=9)
+    ax_r2.set_xlim(0, 1)
+    ax_r2.invert_yaxis()
+    for i, v in enumerate(r_squared):
+        ax_r2.text(v + 0.02, i, f"{v:.2f}", va="center", fontsize=6)
+
+    fig.tight_layout()
+    path = os.path.join(output_dir, "pca_feature_correlations.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {path}")
+
+    # Print a text summary of strong correlations
+    print("\n  PCA-Feature Correlation Summary:")
+    print(f"  {'Feature':25s} {'R²':>6s}  Top PC correlations")
+    print(f"  {'-'*25} {'-'*6}  {'-'*40}")
+    for f in range(n_features):
+        top_pcs = np.argsort(np.abs(corr[:, f]))[::-1][:3]
+        top_strs = [f"PC{pc+1}:{corr[pc,f]:+.2f}" for pc in top_pcs if abs(corr[pc, f]) > 0.05]
+        print(f"  {FEATURE_NAMES[f]:25s} {r_squared[f]:6.3f}  {', '.join(top_strs)}")
+
+    # --- Combined: scatter + binned profile for top 3 PCs, all features ---
+    # Layout: each feature gets 2 rows (scatter, profile) x 3 cols (top PCs)
+    n_bins = 20
+    top_k = 3
+    total_rows = n_features * 2
+    fig2, axes2 = plt.subplots(total_rows, top_k,
+                                figsize=(4.5 * top_k, 3.5 * n_features))
+
+    for i in range(n_features):
+        feat_vals = rolling_features[:, i]
+        top_pcs_i = np.argsort(np.abs(corr[:, i]))[::-1][:top_k]
+        row_scatter = i * 2
+        row_profile = i * 2 + 1
+
+        for rank, pc in enumerate(top_pcs_i):
+            pc_vals = activations_reduced[:, pc]
+            r_val = corr[pc, i]
+            ax_scatter = axes2[row_scatter, rank]
+            ax_profile = axes2[row_profile, rank]
+
+            # --- Scatter row ---
+            vmin, vmax = feat_vals.min(), feat_vals.max()
+            if vmax > vmin:
+                normed = (feat_vals - vmin) / (vmax - vmin)
+            else:
+                normed = np.zeros_like(feat_vals)
+            alphas = 0.05 + 0.5 * normed
+            sc_colors = np.zeros((len(feat_vals), 4))
+            sc_colors[:, 0] = 1.0 * (1 - normed) + 0.55 * normed
+            sc_colors[:, 1] = 0.9 * (1 - normed) + 0.25 * normed
+            sc_colors[:, 2] = 0.2 * (1 - normed) + 0.0 * normed
+            sc_colors[:, 3] = alphas
+
+            ax_scatter.scatter(pc_vals, feat_vals, c=sc_colors, s=1, rasterized=True)
+            ax_scatter.set_title(
+                f"{FEATURE_NAMES[i]} vs PC{pc+1} (r={r_val:+.2f}, r²={r_val**2:.2f})",
+                fontsize=8)
+            ax_scatter.set_ylabel(FEATURE_NAMES[i], fontsize=7)
+            ax_scatter.tick_params(labelsize=5)
+
+            # --- Profile row ---
+            bin_edges = np.percentile(pc_vals, np.linspace(0, 100, n_bins + 1))
+            bin_centers = []
+            bin_means = []
+            bin_sems = []
+            for b in range(n_bins):
+                lo, hi = bin_edges[b], bin_edges[b + 1]
+                if b == n_bins - 1:
+                    mask = (pc_vals >= lo) & (pc_vals <= hi)
+                else:
+                    mask = (pc_vals >= lo) & (pc_vals < hi)
+                if mask.sum() < 2:
+                    continue
+                bin_centers.append((lo + hi) / 2)
+                vals_in_bin = feat_vals[mask]
+                bin_means.append(vals_in_bin.mean())
+                bin_sems.append(vals_in_bin.std() / np.sqrt(mask.sum()))
+
+            bin_centers = np.array(bin_centers)
+            bin_means = np.array(bin_means)
+            bin_sems = np.array(bin_sems)
+
+            ax_profile.plot(bin_centers, bin_means, color="#8B4000", linewidth=2)
+            ax_profile.fill_between(bin_centers, bin_means - bin_sems,
+                                    bin_means + bin_sems, color="#8B4000", alpha=0.2)
+            ax_profile.set_xlabel(f"PC{pc+1} score", fontsize=7)
+            ax_profile.set_ylabel(f"mean {FEATURE_NAMES[i]}", fontsize=7)
+            ax_profile.tick_params(labelsize=5)
+
+            # Sync axes
+            xlim = ax_scatter.get_xlim()
+            ax_profile.set_xlim(xlim)
+            ylim = ax_scatter.get_ylim()
+            ax_profile.set_ylim(ylim)
+
+    fig2.suptitle("PCA Feature Profiles: Scatter (top) + Binned Mean ±SEM (bottom) per Feature",
+                  fontsize=14, y=1.005)
+    fig2.tight_layout()
+    path2 = os.path.join(output_dir, "pca_feature_profiles.png")
+    fig2.savefig(path2, dpi=150, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"  Wrote {path2}")
+
+    return corr, r_squared
+
+
+def generate_umap_pairs(activations, n_neighbors, seed, output_dir, n_components=10):
+    """Run a 10D UMAP on raw activations and plot consecutive dimension pairs."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    print(f"Running {n_components}D UMAP for pairs plot...", flush=True)
+    embedding_hd, _ = run_umap(activations, n_neighbors=n_neighbors,
+                               n_components=n_components, random_state=seed)
+
+    n_pairs = n_components // 2
+    ncols = min(4, n_pairs)
+    nrows = (n_pairs + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows))
+    if n_pairs == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+
+    for idx in range(n_pairs):
+        ax = axes[idx]
+        d1, d2 = idx * 2, idx * 2 + 1
+        ax.scatter(embedding_hd[:, d1], embedding_hd[:, d2],
+                   s=0.5, alpha=0.08, c="#8B4000", rasterized=True)
+        ax.set_xlabel(f"UMAP {d1 + 1}", fontsize=8)
+        ax.set_ylabel(f"UMAP {d2 + 1}", fontsize=8)
+        ax.tick_params(labelsize=6)
+
+    for idx in range(n_pairs, len(axes)):
+        axes[idx].set_visible(False)
+
+    fig.suptitle(f"UMAP {n_components}D Direction Pairs", fontsize=14, y=1.01)
+    fig.tight_layout()
+    path = os.path.join(output_dir, "umap_pairs.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {path}")
+
+
+def _write_summary(labels, stats, output_dir):
+    """Write summary.txt with cluster stats."""
     summary_path = os.path.join(output_dir, "summary.txt")
     with open(summary_path, "w") as f:
         f.write("Activation Clustering Analysis\n")
@@ -377,8 +747,57 @@ def generate_outputs(embedding, labels, features, stats, output_dir):
                 f.write(f"    {rank + 1}. {FEATURE_NAMES[idx]:25s}  "
                         f"mean={m:8.2f}  d={d:+.2f}\n")
             f.write("\n")
-
     print(f"  Wrote {summary_path}")
+
+
+def _write_feature_heatmap(stats, output_dir):
+    """Write cluster_features.png heatmap of Cohen's d."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not stats:
+        print("No clusters found, skipping feature plot.")
+        return
+
+    cluster_ids = sorted(stats.keys())
+    n_feats = len(FEATURE_NAMES)
+    d_matrix = np.array([stats[c]["cohens_d"] for c in cluster_ids])
+
+    fig, ax = plt.subplots(figsize=(max(12, n_feats * 0.8), max(4, len(cluster_ids) * 0.6)))
+    im = ax.imshow(d_matrix, aspect="auto", cmap="RdBu_r", vmin=-3, vmax=3)
+    ax.set_xticks(range(n_feats))
+    ax.set_xticklabels(FEATURE_NAMES, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(range(len(cluster_ids)))
+    ax.set_yticklabels([f"C{c} (n={stats[c]['size']})" for c in cluster_ids], fontsize=8)
+    ax.set_title("Cohen's d per Feature per Cluster")
+    fig.colorbar(im, ax=ax, label="Cohen's d")
+
+    for i in range(len(cluster_ids)):
+        for j in range(n_feats):
+            val = d_matrix[i, j]
+            if abs(val) > 0.5:
+                ax.text(j, i, f"{val:.1f}", ha="center", va="center",
+                        fontsize=6, color="white" if abs(val) > 1.5 else "black")
+
+    abs_output_dir = os.path.abspath(output_dir)
+    ax.text(1.0, -0.02, abs_output_dir, ha="right", va="top",
+            fontsize=5, color="gray", family="monospace", transform=ax.transAxes)
+    feat_path = os.path.join(output_dir, "cluster_features.png")
+    fig.savefig(feat_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {feat_path}")
+
+
+def generate_outputs(embedding, labels, features, stats, output_dir):
+    """Generate summary text, UMAP scatter, and feature heatmap."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    _write_summary(labels, stats, output_dir)
 
     # --- umap_scatter.png ---
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -405,38 +824,187 @@ def generate_outputs(embedding, labels, features, stats, output_dir):
     plt.close(fig)
     print(f"  Wrote {scatter_path}")
 
-    # --- cluster_features.png ---
-    if not stats:
-        print("No clusters found, skipping feature plot.")
-        return
+    _write_feature_heatmap(stats, output_dir)
 
-    cluster_ids = sorted(stats.keys())
-    n_feats = len(FEATURE_NAMES)
-    d_matrix = np.array([stats[c]["cohens_d"] for c in cluster_ids])
 
-    fig, ax = plt.subplots(figsize=(max(12, n_feats * 0.8), max(4, len(cluster_ids) * 0.6)))
-    im = ax.imshow(d_matrix, aspect="auto", cmap="RdBu_r", vmin=-3, vmax=3)
-    ax.set_xticks(range(n_feats))
-    ax.set_xticklabels(FEATURE_NAMES, rotation=45, ha="right", fontsize=8)
-    ax.set_yticks(range(len(cluster_ids)))
-    ax.set_yticklabels([f"C{c} (n={stats[c]['size']})" for c in cluster_ids], fontsize=8)
-    ax.set_title("Cohen's d per Feature per Cluster")
-    fig.colorbar(im, ax=ax, label="Cohen's d")
 
-    # Annotate cells
-    for i in range(len(cluster_ids)):
-        for j in range(n_feats):
-            val = d_matrix[i, j]
-            if abs(val) > 0.5:
-                ax.text(j, i, f"{val:.1f}", ha="center", va="center",
-                        fontsize=6, color="white" if abs(val) > 1.5 else "black")
+def generate_dendrogram_explorer(clusterer, embedding, output_dir, n_frames=75):
+    """Generate interactive Plotly HTML for exploring HDBSCAN's condensed tree hierarchy.
 
-    ax.text(1.0, -0.02, abs_output_dir, ha="right", va="top",
-            fontsize=5, color="gray", family="monospace", transform=ax.transAxes)
-    feat_path = os.path.join(output_dir, "cluster_features.png")
-    fig.savefig(feat_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Wrote {feat_path}")
+    Precomputes cluster assignments at sampled lambda (1/distance) thresholds from
+    the condensed tree and renders them as a Plotly slider over fixed UMAP coordinates.
+    Low lambda = few broad clusters; high lambda = many fine-grained clusters + more noise.
+    """
+    import colorsys
+
+    import plotly.graph_objects as go
+
+    tree_df = clusterer.condensed_tree_.to_pandas()
+    n_points = embedding.shape[0]
+
+    # --- Build cluster hierarchy from condensed tree ---
+    is_cluster_event = tree_df["child_size"] > 1
+    cluster_tree = tree_df[is_cluster_event]
+    point_tree = tree_df[~is_cluster_event]
+
+    # parent -> [(child_cluster, birth_lambda)]
+    cluster_children = defaultdict(list)
+    cluster_birth = {}
+    for _, row in cluster_tree.iterrows():
+        parent, child = int(row["parent"]), int(row["child"])
+        lam = row["lambda_val"]
+        cluster_children[parent].append((child, lam))
+        cluster_birth[child] = lam
+
+    root = int(tree_df["parent"].min())
+    cluster_birth[root] = 0.0
+
+    # Point info: which cluster each point lives in and when it falls out
+    point_home = {}
+    point_lambda = {}
+    for _, row in point_tree.iterrows():
+        pid = int(row["child"])
+        point_home[pid] = int(row["parent"])
+        point_lambda[pid] = row["lambda_val"]
+
+    # Cluster parent map (child -> parent) for ancestor walks
+    cluster_parent_map = {}
+    for _, row in cluster_tree.iterrows():
+        cluster_parent_map[int(row["child"])] = int(row["parent"])
+
+    def get_ancestors(cid):
+        path = [cid]
+        while cid in cluster_parent_map:
+            cid = cluster_parent_map[cid]
+            path.append(cid)
+        return path
+
+    ancestor_cache = {c: get_ancestors(c) for c in cluster_birth}
+
+    # Pre-cache each point's ancestor chain (via its home cluster)
+    point_ancestors = {}
+    for pid in range(n_points):
+        if pid in point_home:
+            point_ancestors[pid] = ancestor_cache[point_home[pid]]
+
+    # --- Sample lambda values across the condensed tree's range ---
+    lam_min = tree_df["lambda_val"].min()
+    lam_max = tree_df["lambda_val"].max()
+    sampled_lambdas = np.linspace(lam_min, lam_max, n_frames)
+
+    def get_active_clusters(lambda_cut):
+        """Return the set of cluster IDs that are 'leaves' of the tree at this lambda."""
+        active = set()
+
+        def recurse(cid):
+            born_children = [
+                (c, l) for c, l in cluster_children.get(cid, []) if l <= lambda_cut
+            ]
+            if not born_children:
+                active.add(cid)
+            else:
+                for c, _l in born_children:
+                    recurse(c)
+
+        recurse(root)
+        return active
+
+    # --- Precompute assignments at each sampled lambda ---
+    with spinner("Precomputing dendrogram frames"):
+        all_active_ids = set()
+        frame_data = []
+
+        for lam in sampled_lambdas:
+            active = get_active_clusters(lam)
+            all_active_ids.update(active)
+
+            labels = np.full(n_points, -1, dtype=int)
+            for pid in range(n_points):
+                if pid not in point_ancestors:
+                    continue
+                if point_lambda[pid] <= lam:
+                    continue  # point fell out → noise
+                for anc in point_ancestors[pid]:
+                    if anc in active:
+                        labels[pid] = anc
+                        break
+
+            n_clusters = len(set(labels[labels >= 0]))
+            n_noise = int((labels == -1).sum())
+            frame_data.append((lam, labels, n_clusters, n_noise))
+
+    # --- Assign stable colors to cluster IDs ---
+    sorted_cids = sorted(all_active_ids)
+    palette = {}
+    for i, cid in enumerate(sorted_cids):
+        hue = i / max(len(sorted_cids), 1)
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.85)
+        palette[cid] = (int(r * 255), int(g * 255), int(b * 255))
+
+    def labels_to_colors(labels):
+        colors = []
+        for l in labels:
+            if l == -1:
+                colors.append("rgba(180,180,180,0.15)")
+            else:
+                r, g, b = palette.get(l, (128, 128, 128))
+                colors.append(f"rgba({r},{g},{b},0.7)")
+        return colors
+
+    # --- Build Plotly figure with slider ---
+    with spinner("Building Plotly HTML"):
+        initial_colors = labels_to_colors(frame_data[0][1])
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=embedding[:, 0].tolist(),
+                y=embedding[:, 1].tolist(),
+                mode="markers",
+                marker=dict(color=initial_colors, size=3, line=dict(width=0)),
+                hoverinfo="skip",
+            )
+        )
+
+        steps = []
+        for i, (lam, labels, nc, nn) in enumerate(frame_data):
+            noise_pct = nn / n_points * 100
+            colors = labels_to_colors(labels)
+            steps.append(
+                dict(
+                    method="restyle",
+                    args=[{"marker.color": [colors]}],
+                    label=f"\u03bb={lam:.4f} \u2014 {nc} clusters, {noise_pct:.0f}% noise",
+                )
+            )
+
+        fig.update_layout(
+            sliders=[
+                dict(
+                    active=0,
+                    steps=steps,
+                    currentvalue=dict(visible=True, xanchor="center"),
+                    pad=dict(t=40),
+                    len=0.9,
+                    x=0.05,
+                )
+            ],
+            title=dict(
+                text="Dendrogram Explorer \u2014 HDBSCAN Condensed Tree on UMAP",
+                x=0.5,
+            ),
+            xaxis_title="UMAP 1",
+            yaxis_title="UMAP 2",
+            width=950,
+            height=700,
+            template="plotly_white",
+            showlegend=False,
+        )
+
+        html_path = os.path.join(output_dir, "dendrogram_explorer.html")
+        fig.write_html(html_path, include_plotlyjs=True)
+
+    print(f"  Wrote {html_path}")
 
 
 def main():
@@ -445,7 +1013,7 @@ def main():
     parser.add_argument("data_dir", type=str,
                         help="Directory containing activation data (from extract_activations.py)")
     parser.add_argument("--subsample", type=int, default=10,
-                        help="Keep every Nth record per trajectory (default: 10)")
+                        help="Keep every Nth record per trajectory (default: 10, 1 = no subsampling)")
     parser.add_argument("--hdbscan-min-cluster", type=int, default=15,
                         help="HDBSCAN min_cluster_size (default: 15)")
     parser.add_argument("--hdbscan-min-samples", type=int, default=5,
@@ -457,6 +1025,18 @@ def main():
                              "Uses PCA to --pre-cluster-dims first, then HDBSCAN, then UMAP for viz only.")
     parser.add_argument("--pre-cluster-dims", type=int, default=30,
                         help="PCA dimensions before clustering when --cluster-before-umap (default: 30)")
+    parser.add_argument("--metric-only", action="store_true",
+                        help="Skip HDBSCAN clustering and only produce the metric UMAP plot.")
+    parser.add_argument("--feature-scatter", action="store_true",
+                        help="Generate scatter matrix of all feature pairs (rolling averages).")
+    parser.add_argument("--umap-pairs", action="store_true",
+                        help="Run a 10D UMAP on raw activations and plot consecutive dimension pairs.")
+    parser.add_argument("--umap-pairs-dims", type=int, default=10,
+                        help="Number of UMAP dimensions for --umap-pairs (default: 10)")
+    parser.add_argument("--dendrogram-explorer", action="store_true",
+                        help="Generate interactive Plotly HTML for scrubbing through HDBSCAN's "
+                             "condensed tree hierarchy on the UMAP scatter. "
+                             "Requires --cluster-before-umap.")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: auto-named under analysis_results/)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -464,7 +1044,7 @@ def main():
 
     data_dir = Path(args.data_dir)
     records, total_datapoints = load_data(args.data_dir, subsample_rate=args.subsample)
-    if len(records) < args.hdbscan_min_cluster:
+    if not args.metric_only and len(records) < args.hdbscan_min_cluster:
         print(f"Only {len(records)} records after subsampling, need at least "
               f"{args.hdbscan_min_cluster}. Try --subsample 1.")
         return
@@ -483,59 +1063,105 @@ def main():
 
     print(f"\nActivations: {activations.shape}, Features: {features.shape}", flush=True)
 
+    # --- Run 2D UMAP (unless --metric-only) ---
+    embedding = umap_reducer = None
+    if not args.metric_only:
+        print(f"Running UMAP on {activations.shape[0]} points...", flush=True)
+        embedding, umap_reducer = run_umap(activations, n_neighbors=args.umap_neighbors,
+                                           random_state=args.seed)
+
+    # --- Run PCA if requested ---
+    labels = hdbscan_clusterer = pca = activations_reduced = None
     if args.cluster_before_umap:
-        # Cluster in high-D: PCA denoise → HDBSCAN → UMAP for viz only
         from sklearn.decomposition import PCA
 
         pca_dims = min(args.pre_cluster_dims, activations.shape[1], activations.shape[0])
-        print(f"Running PCA to {pca_dims} dims for clustering...", flush=True)
+        print(f"Running PCA to {pca_dims} dims...", flush=True)
         pca = PCA(n_components=pca_dims, random_state=args.seed)
         activations_reduced = pca.fit_transform(activations)
         explained = pca.explained_variance_ratio_.sum()
         print(f"  PCA explains {explained:.1%} of variance")
 
-        print(f"Running HDBSCAN on {pca_dims}-D PCA space...", flush=True)
-        labels, hdbscan_clusterer = run_hdbscan(activations_reduced,
-                                                min_cluster_size=args.hdbscan_min_cluster,
-                                                min_samples=args.hdbscan_min_samples)
+    # --- Run HDBSCAN if not --metric-only ---
+    if not args.metric_only:
+        if args.cluster_before_umap:
+            print(f"Running HDBSCAN on {pca_dims}-D PCA space...", flush=True)
+            labels, hdbscan_clusterer = run_hdbscan(activations_reduced,
+                                                    min_cluster_size=args.hdbscan_min_cluster,
+                                                    min_samples=args.hdbscan_min_samples)
+        else:
+            labels, hdbscan_clusterer = run_hdbscan(embedding,
+                                                    min_cluster_size=args.hdbscan_min_cluster,
+                                                    min_samples=args.hdbscan_min_samples)
 
-        print(f"Running UMAP for visualization only...", flush=True)
-        embedding, umap_reducer = run_umap(activations, n_neighbors=args.umap_neighbors,
-                                           random_state=args.seed)
-    else:
-        # Default: UMAP → HDBSCAN (cluster the 2D embedding)
-        print(f"Running UMAP on {activations.shape[0]} points...", flush=True)
-        embedding, umap_reducer = run_umap(activations, n_neighbors=args.umap_neighbors,
-                                           random_state=args.seed)
-        labels, hdbscan_clusterer = run_hdbscan(embedding,
-                                                min_cluster_size=args.hdbscan_min_cluster,
-                                                min_samples=args.hdbscan_min_samples)
-    stats = compute_cluster_stats(features, labels, metadata, rng_seed=args.seed)
+    # --- Compute rolling features ---
+    print(f"\nComputing rolling feature averages...")
+    rolling_features = compute_rolling_features(features, metadata)
 
+    # --- Generate outputs ---
+    os.makedirs(output_dir, exist_ok=True)
     print(f"\nWriting outputs to {output_dir}/")
-    generate_outputs(embedding, labels, features, stats, output_dir)
+    imgs = []
 
-    # Save fitted models and per-record label mapping for downstream use
-    # (e.g. agent_life_visualization.py can overlay cluster assignments)
+    if labels is not None:
+        stats = compute_cluster_stats(features, labels, metadata, rng_seed=args.seed)
+        generate_outputs(embedding, labels, features, stats, output_dir)
+        imgs += ["umap_scatter.png", "cluster_features.png"]
+
+    if embedding is not None:
+        generate_metric_umap(embedding, rolling_features, output_dir)
+        imgs.append("umap_metric_scatter.png")
+
+    if args.feature_scatter:
+        generate_feature_scatter(rolling_features, output_dir)
+        imgs.append("feature_scatter.png")
+
+    if activations_reduced is not None:
+        generate_pca_pairs(activations_reduced, output_dir)
+        imgs.append("pca_pairs.png")
+        generate_pca_feature_correlations(activations_reduced, rolling_features, pca,
+                                          output_dir)
+        imgs += ["pca_feature_correlations.png", "pca_feature_profiles.png"]
+
+    if args.umap_pairs:
+        generate_umap_pairs(activations, args.umap_neighbors, args.seed,
+                            output_dir, n_components=args.umap_pairs_dims)
+        imgs.append("umap_pairs.png")
+
+    if args.dendrogram_explorer:
+        if not args.cluster_before_umap:
+            print("ERROR: --dendrogram-explorer requires --cluster-before-umap")
+            sys.exit(1)
+        generate_dendrogram_explorer(hdbscan_clusterer, embedding, output_dir)
+
+    # --- Save models ---
     import joblib
-    joblib.dump(umap_reducer, os.path.join(output_dir, "umap_model.pkl"))
-    joblib.dump(hdbscan_clusterer, os.path.join(output_dir, "hdbscan_model.pkl"))
-    if args.cluster_before_umap:
+    if umap_reducer is not None:
+        joblib.dump(umap_reducer, os.path.join(output_dir, "umap_model.pkl"))
+    if hdbscan_clusterer is not None:
+        joblib.dump(hdbscan_clusterer, os.path.join(output_dir, "hdbscan_model.pkl"))
+    if pca is not None:
         joblib.dump(pca, os.path.join(output_dir, "pca_model.pkl"))
-    # Save label mapping: (env_id, agent_id, step) -> cluster_label
-    label_records = np.column_stack([
-        metadata["env_id"], metadata["agent_id"], metadata["step"], labels
-    ])
-    np.save(os.path.join(output_dir, "cluster_labels.npy"), label_records)
-    print(f"  Wrote umap_model.pkl, hdbscan_model.pkl, cluster_labels.npy")
+    if labels is not None:
+        label_records = np.column_stack([
+            metadata["env_id"], metadata["agent_id"], metadata["step"], labels
+        ])
+        np.save(os.path.join(output_dir, "cluster_labels.npy"), label_records)
+    saved = [f for f in ["umap_model.pkl", "hdbscan_model.pkl", "pca_model.pkl", "cluster_labels.npy"]
+             if os.path.exists(os.path.join(output_dir, f))]
+    if saved:
+        print(f"  Wrote {', '.join(saved)}")
 
-    # Display plots inline if imgcat is available (e.g. iTerm2)
-    import shutil
-    if shutil.which("imgcat"):
-        import subprocess
-        for img in ["umap_scatter.png", "cluster_features.png"]:
-            img_path = os.path.join(output_dir, img)
-            subprocess.run(["imgcat", img_path], check=False)
+    # --- Display plots inline ---
+    import subprocess
+    for img in imgs:
+        img_path = os.path.join(output_dir, img)
+        try:
+            result = subprocess.run(["imgcat", img_path], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"  imgcat {img} failed (exit {result.returncode}): {result.stderr.strip()}")
+        except FileNotFoundError:
+            break
 
     print(f"\nDone.")
 
