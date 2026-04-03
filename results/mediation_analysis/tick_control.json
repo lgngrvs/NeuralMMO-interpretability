@@ -1,0 +1,247 @@
+{
+  "n_visible_entities": {
+    "type": "cont",
+    "uncontrolled": 0.45502525568008423,
+    "controlled": 0.32132261991500854,
+    "delta": 0.13370263576507568,
+    "pct_via_tick": 29.383563680491253
+  },
+  "n_visible_npcs": {
+    "type": "cont",
+    "uncontrolled": 0.2706080675125122,
+    "controlled": 0.26523834466934204,
+    "delta": 0.005369722843170166,
+    "pct_via_tick": 1.984317353333113
+  },
+  "n_visible_players": {
+    "type": "cont",
+    "uncontrolled": 0.56818026304245,
+    "controlled": 0.42206263542175293,
+    "delta": 0.14611762762069702,
+    "pct_via_tick": 25.716772849214625
+  },
+  "nearest_entity_dist": {
+    "type": "cont",
+    "uncontrolled": 0.12757211923599243,
+    "controlled": 0.04428309202194214,
+    "delta": 0.08328902721405029,
+    "pct_via_tick": 65.28779776714066
+  },
+  "nearest_player_dist": {
+    "type": "cont",
+    "uncontrolled": 0.3608073592185974,
+    "controlled": 0.16060417890548706,
+    "delta": 0.20020318031311035,
+    "pct_via_tick": 55.487554562825856
+  },
+  "self_health": {
+    "type": "cont",
+    "uncontrolled": 0.7215148210525513,
+    "controlled": 0.7225992679595947,
+    "delta": -0.001084446907043457,
+    "pct_via_tick": -0.15030140412936463
+  },
+  "self_food": {
+    "type": "cont",
+    "uncontrolled": 0.7140190601348877,
+    "controlled": 0.7141209840774536,
+    "delta": -0.00010192394256591797,
+    "pct_via_tick": -0.014274680923316414
+  },
+  "self_water": {
+    "type": "cont",
+    "uncontrolled": 0.7290738821029663,
+    "controlled": 0.731284499168396,
+    "delta": -0.0022106170654296875,
+    "pct_via_tick": -0.30320892294938695
+  },
+  "self_gold": {
+    "type": "cont",
+    "uncontrolled": 0.2206518054008484,
+    "controlled": 0.03039449453353882,
+    "delta": 0.19025731086730957,
+    "pct_via_tick": 86.22513218130145
+  },
+  "max_combat_level": {
+    "type": "cont",
+    "uncontrolled": 0.7897530198097229,
+    "controlled": 0.551034688949585,
+    "delta": 0.23871833086013794,
+    "pct_via_tick": 30.22696018530615
+  },
+  "melee_level": {
+    "type": "cont",
+    "uncontrolled": 0.7779017686843872,
+    "controlled": 0.5343272089958191,
+    "delta": 0.24357455968856812,
+    "pct_via_tick": 31.311737483321235
+  },
+  "range_level": {
+    "type": "cont",
+    "uncontrolled": 0.7567698955535889,
+    "controlled": 0.40902942419052124,
+    "delta": 0.3477404713630676,
+    "pct_via_tick": 45.9506216362756
+  },
+  "mage_level": {
+    "type": "cont",
+    "uncontrolled": 0.7404989004135132,
+    "controlled": 0.39053356647491455,
+    "delta": 0.34996533393859863,
+    "pct_via_tick": 47.260749981285485
+  },
+  "in_combat": {
+    "type": "bin",
+    "uncontrolled": 0.8056361741700498,
+    "controlled": 0.7192278568296132,
+    "delta": 0.08640831734043664,
+    "pct_via_tick": 28.271626411722057
+  },
+  "self_damage": {
+    "type": "cont",
+    "uncontrolled": 0.4279629588127136,
+    "controlled": 0.4240275025367737,
+    "delta": 0.003935456275939941,
+    "pct_via_tick": 0.9195787146761426
+  },
+  "fishing_level": {
+    "type": "cont",
+    "uncontrolled": 0.5389381647109985,
+    "controlled": 0.4013173580169678,
+    "delta": 0.13762080669403076,
+    "pct_via_tick": 25.535546692602267
+  },
+  "herbalism_level": {
+    "type": "cont",
+    "uncontrolled": 0.4949396252632141,
+    "controlled": 0.2408168911933899,
+    "delta": 0.2541227340698242,
+    "pct_via_tick": 51.34418848252028
+  },
+  "prospecting_level": {
+    "type": "cont",
+    "uncontrolled": 0.34497493505477905,
+    "controlled": 0.2381942868232727,
+    "delta": 0.10678064823150635,
+    "pct_via_tick": 30.95316134041753
+  },
+  "carving_level": {
+    "type": "cont",
+    "uncontrolled": 0.4783989191055298,
+    "controlled": 0.39665311574935913,
+    "delta": 0.08174580335617065,
+    "pct_via_tick": 17.08737208457998
+  },
+  "alchemy_level": {
+    "type": "cont",
+    "uncontrolled": 0.19294172525405884,
+    "controlled": 0.11196255683898926,
+    "delta": 0.08097916841506958,
+    "pct_via_tick": 41.970791081316946
+  },
+  "max_harvest_level": {
+    "type": "cont",
+    "uncontrolled": 0.5970112681388855,
+    "controlled": 0.23742908239364624,
+    "delta": 0.35958218574523926,
+    "pct_via_tick": 60.230385075677994
+  },
+  "item_level": {
+    "type": "cont",
+    "uncontrolled": 0.10644656419754028,
+    "controlled": 0.07956534624099731,
+    "delta": 0.02688121795654297,
+    "pct_via_tick": 25.253250923775827
+  },
+  "n_inventory_items": {
+    "type": "cont",
+    "uncontrolled": 0.21231764554977417,
+    "controlled": 0.2154960036277771,
+    "delta": -0.0031783580780029297,
+    "pct_via_tick": -1.4969825375431733
+  },
+  "n_equipped_items": {
+    "type": "cont",
+    "uncontrolled": 0.10688954591751099,
+    "controlled": 0.09593838453292847,
+    "delta": 0.01095116138458252,
+    "pct_via_tick": 10.245306302483288
+  },
+  "n_listed_items": {
+    "type": "cont",
+    "uncontrolled": 0.03591346740722656,
+    "controlled": 0.02414780855178833,
+    "delta": 0.011765658855438232,
+    "pct_via_tick": 32.76113309256997
+  },
+  "self_row": {
+    "type": "cont",
+    "uncontrolled": 0.8153667449951172,
+    "controlled": 0.8186588287353516,
+    "delta": -0.003292083740234375,
+    "pct_via_tick": -0.40375496798733057
+  },
+  "self_col": {
+    "type": "cont",
+    "uncontrolled": 0.8493300676345825,
+    "controlled": 0.8517161011695862,
+    "delta": -0.002386033535003662,
+    "pct_via_tick": -0.28093124521646323
+  },
+  "n_water_tiles": {
+    "type": "cont",
+    "uncontrolled": 0.2891572117805481,
+    "controlled": 0.23402351140975952,
+    "delta": 0.055133700370788574,
+    "pct_via_tick": 19.067032785138192
+  },
+  "n_forest_tiles": {
+    "type": "cont",
+    "uncontrolled": 0.5156182646751404,
+    "controlled": 0.46417438983917236,
+    "delta": 0.05144387483596802,
+    "pct_via_tick": 9.977124233250285
+  },
+  "tick": {
+    "type": "cont",
+    "uncontrolled": 0.8888611197471619,
+    "controlled": null,
+    "delta": null,
+    "pct_via_tick": null
+  },
+  "time_alive": {
+    "type": "cont",
+    "uncontrolled": 0.8888611197471619,
+    "controlled": -0.01138758659362793,
+    "delta": 0.9002487063407898,
+    "pct_via_tick": 101.28114351507097
+  },
+  "is_moving": {
+    "type": "bin",
+    "uncontrolled": 0.6335421372887737,
+    "controlled": 0.6384649829468695,
+    "delta": -0.004922845658095754,
+    "pct_via_tick": -3.686361292429004
+  },
+  "is_attacking": {
+    "type": "bin",
+    "uncontrolled": 0.7762756947084758,
+    "controlled": 0.7502504481146924,
+    "delta": 0.026025246593783358,
+    "pct_via_tick": 9.420027563859723
+  },
+  "is_trading": {
+    "type": "bin",
+    "uncontrolled": 0.7418853758615405,
+    "controlled": 0.665225300832456,
+    "delta": 0.07666007502908445,
+    "pct_via_tick": 31.69272832474422
+  },
+  "is_using_item": {
+    "type": "bin",
+    "uncontrolled": 0.7231946629272887,
+    "controlled": 0.6781403372923238,
+    "delta": 0.04505432563496492,
+    "pct_via_tick": 20.186112447340417
+  }
+}

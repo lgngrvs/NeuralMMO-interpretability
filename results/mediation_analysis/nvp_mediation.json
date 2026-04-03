@@ -1,0 +1,57 @@
+{
+  "r2_uncontrolled": 0.56818026304245,
+  "mediator_sets": {
+    "Combat": {
+      "r2_controlled": 0.4132381081581116,
+      "pct_explained": 27.269893898578157,
+      "mediators": [
+        "in_combat",
+        "self_damage",
+        "max_combat_level",
+        "is_attacking"
+      ]
+    },
+    "Position": {
+      "r2_controlled": 0.5701379776000977,
+      "pct_explained": -0.3445587052187671,
+      "mediators": [
+        "self_row",
+        "self_col"
+      ]
+    },
+    "Time": {
+      "r2_controlled": 0.42206358909606934,
+      "pct_explained": 25.716605002075532,
+      "mediators": [
+        "tick",
+        "time_alive"
+      ]
+    },
+    "Combat+Position": {
+      "r2_controlled": 0.4157644510269165,
+      "pct_explained": 26.82525633667534,
+      "mediators": [
+        "in_combat",
+        "self_damage",
+        "max_combat_level",
+        "is_attacking",
+        "self_row",
+        "self_col"
+      ]
+    },
+    "Combat+Position+Time": {
+      "r2_controlled": 0.3991607427597046,
+      "pct_explained": 29.747516990064394,
+      "mediators": [
+        "in_combat",
+        "self_damage",
+        "max_combat_level",
+        "is_attacking",
+        "self_row",
+        "self_col",
+        "tick",
+        "time_alive"
+      ]
+    }
+  }
+}

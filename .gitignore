@@ -7,6 +7,8 @@ wandb
 maps
 pool
 activation_data/
+activation_data_10x/
+*.cache.npz
 resources
 
 # Byte-compiled / optimized / DLL files
