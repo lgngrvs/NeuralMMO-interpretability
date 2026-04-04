@@ -109,6 +109,45 @@ Many features correlate with game progression. After residualizing tick:
 
 **Results**: `results/mediation_analysis/`
 
+## Experiment 5: Subspace Activation Patching
+
+**Script**: `activation_patching.py`
+**Method**: Interchange intervention (Geiger et al., 2021) along the learned tick probe direction. Instead of swapping entire activation vectors, we decompose into tick-relevant and orthogonal components and swap only the tick component.
+
+Given the normalized probe direction **d**, for a target activation **a_target** and source **a_source**:
+```
+a_patched = a_target + ((a_source . d) - (a_target . d)) * d
+```
+
+We patch mid-tick (400-600) and late-tick (>800) components into early-tick (0-10) activations (n=35,197 early samples for robust baselines). All 4 embedding-free action heads are evaluated: move (5-way), attack_style (3-way), gold_quantity (99-way), inventory_price (99-way).
+
+### Controls
+- **Random direction baseline**: Same swap along 50 random unit vectors → null distribution
+- **Full activation swap**: Replace entire vector (upper bound on effect)
+- **Orthogonal complement swap**: Replace everything EXCEPT the tick direction
+- **Dose-response curve**: Interpolate intervention strength t from 0 to 1.5
+
+### Results
+
+| Condition | move KL | attack_style KL | gold_qty KL | inv_price KL |
+|---|---|---|---|---|
+| Tick direction only | 0.0038 | 0.0071 | 0.0206 | 0.0255 |
+| Full activation swap | 0.6982 | 0.0378 | 0.1345 | 0.1454 |
+| Orthogonal complement | 0.6867 | 0.0461 | 0.1089 | 0.1072 |
+| Random direction (mean) | 0.0003 | 0.0002 | 0.0003 | 0.0003 |
+
+### Key findings
+
+1. **The tick direction is 14-94x stronger than random directions** — a real causal signal, not noise.
+2. **But accounts for <1% of full-swap behavioral change in move** (0.004 vs 0.70 KL). Almost all early/late behavioral differences live in the orthogonal complement.
+3. **Largest tick-direction effect is on economic heads**: gold_quantity (78x random) and inventory_price (94x random), not movement — tick primarily modulates economic behavior.
+4. **Move probability shifts are consistent but small**: South +0.024, West -0.023 when patching late→early. Dose-response is clean and monotonic.
+5. **Attack style shows larger tick-mediated shift**: Melee +0.058, Range -0.036 (late→early) — the model shifts toward melee as game time increases, causally through the tick direction.
+
+**Interpretation**: The tick representation is real and causal, but it's a subtle modulator rather than the primary driver of behavioral differences. Most early-vs-late behavioral change comes from other co-varying dimensions (position, resources, combat state) that are not captured by the 1-d tick probe direction.
+
+**Results**: `results/activation_patching/`
+
 ## File Changes Summary
 
 | File | Change |
@@ -119,3 +158,4 @@ Many features correlate with game progression. After residualizing tick:
 | `train_nonlinear_probes.py` | New file: 2-layer MLP probes |
 | `mediation_analysis.py` | New file: causal mediation via residualization |
 | `docs/mediation_analysis_explainer.md` | New file: methodology explainer |
+| `activation_patching.py` | New file: subspace activation patching via interchange interventions |

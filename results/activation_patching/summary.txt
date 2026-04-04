@@ -1,0 +1,25 @@
+ACTIVATION PATCHING SUMMARY
+============================================================
+Total records: 280332
+Early records (tick <= 10): 35197
+Late records (tick > 900): 49
+
+Move direction probabilities (mean):
+  Dir         Early     Late  Patched    Delta
+  North      0.2468   0.2043   0.2379  +0.0337
+  South      0.2220   0.3293   0.2655  -0.0638
+  East       0.2373   0.1777   0.1848  +0.0071
+  West       0.2530   0.2149   0.2736  +0.0587
+  Stay       0.0409   0.0738   0.0381  -0.0357
+
+Attack style probabilities (mean):
+  Style       Early     Late  Patched    Delta
+  Melee      0.3690   0.3804   0.3612  -0.0191
+  Range      0.3767   0.3398   0.3894  +0.0496
+  Mage       0.2543   0.2799   0.2494  -0.0305
+
+KL Divergence (95% bootstrap CI):
+  Move e2l: 0.8799 [0.7807, 1.0003]
+  Atk  e2l: 0.0354 [0.0271, 0.0463]
+  Move l2e: 0.6534 [0.6501, 0.6572]
+  Atk  l2e: 0.0309 [0.0306, 0.0312]
