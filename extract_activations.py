@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import tempfile
+import gc
 
 import nmmo
 import nmmo.core.config as nc
@@ -235,12 +236,15 @@ def build_observation_record(env_outputs, idx):
     return obs
 
 
-def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None):
+def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
+                         streaming=False, flush_interval=5000):
     """Run evaluation while extracting activations, observations, and actions.
 
     Args:
         max_steps: If set, stop after this many env steps regardless of episodes completed.
                    Useful for smoke testing.
+        streaming: If True, write records to JSONL incrementally to avoid OOM.
+        flush_interval: How often to flush records to disk (only used if streaming=True).
     """
     config = data.config
     inner_policy = get_inner_policy(data.agent)
@@ -262,8 +266,14 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None):
 
     data.policy_pool.mask[:] = 1
 
-    # records keyed by policy name
-    records = {}
+    # Streaming writer or in-memory records
+    writer = None
+    records = None
+    if streaming:
+        writer = StreamingRecordWriter(output_dir, flush_interval=flush_interval)
+    else:
+        records = {}
+
     cnt_episode = 0
     global_step = 0
 
@@ -339,19 +349,21 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None):
                 if activation is None:
                     continue
 
-                if policy_name not in records:
-                    records[policy_name] = []
+                record = {
+                    "step": global_step,
+                    "env_id": int(env_id[idx]),
+                    "agent_id": int(agent_ids[idx]),
+                    "activation": activation,
+                    "observation": build_observation_record(env_outputs, idx),
+                    "action": actions_np[idx].tolist(),
+                }
 
-                records[policy_name].append(
-                    {
-                        "step": global_step,
-                        "env_id": int(env_id[idx]),
-                        "agent_id": int(agent_ids[idx]),
-                        "activation": activation,
-                        "observation": build_observation_record(env_outputs, idx),
-                        "action": actions_np[idx].tolist(),
-                    }
-                )
+                if streaming:
+                    writer.append(policy_name, record)
+                else:
+                    if policy_name not in records:
+                        records[policy_name] = []
+                    records[policy_name].append(record)
 
             # Count completed episodes
             for policy_name, policy_i in i.items():
@@ -367,17 +379,82 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None):
             global_step += 1
 
         data.sort_keys = []
-        total_records = sum(len(v) for v in records.values())
+        if streaming:
+            total_records = writer.total_records()
+        else:
+            total_records = sum(len(v) for v in records.values())
         print(f"Step {global_step}, {cnt_episode} episodes, {total_records} records collected.")
 
     for handle in hook_handles:
         handle.remove()
 
+    if streaming:
+        writer.close()
+        writer.summary()
+        return None  # data already on disk
     return records
 
 
+class StreamingRecordWriter:
+    """Write records to JSONL files incrementally to avoid OOM."""
+
+    def __init__(self, output_dir, flush_interval=5000):
+        self.output_dir = output_dir
+        self.flush_interval = flush_interval
+        self.buffers = {}  # policy_name -> list of records
+        self.file_handles = {}  # policy_name -> open file handle
+        self.counts = {}  # policy_name -> total records written
+
+    def append(self, policy_name, record):
+        if policy_name not in self.buffers:
+            self.buffers[policy_name] = []
+            self.counts[policy_name] = 0
+        self.buffers[policy_name].append(record)
+        if len(self.buffers[policy_name]) >= self.flush_interval:
+            self.flush(policy_name)
+
+    def _get_handle(self, policy_name):
+        if policy_name not in self.file_handles:
+            policy_dir = os.path.join(self.output_dir, policy_name)
+            os.makedirs(policy_dir, exist_ok=True)
+            filepath = os.path.join(policy_dir, "activations.jsonl")
+            self.file_handles[policy_name] = open(filepath, "a")
+        return self.file_handles[policy_name]
+
+    def flush(self, policy_name):
+        buf = self.buffers.get(policy_name, [])
+        if not buf:
+            return
+        fh = self._get_handle(policy_name)
+        for record in buf:
+            fh.write(json.dumps(record) + "\n")
+        fh.flush()
+        self.counts[policy_name] = self.counts.get(policy_name, 0) + len(buf)
+        self.buffers[policy_name] = []
+        gc.collect()
+
+    def flush_all(self):
+        for policy_name in list(self.buffers.keys()):
+            self.flush(policy_name)
+
+    def close(self):
+        self.flush_all()
+        for fh in self.file_handles.values():
+            fh.close()
+        self.file_handles.clear()
+
+    def total_records(self):
+        return sum(self.counts.values()) + sum(len(b) for b in self.buffers.values())
+
+    def summary(self):
+        for name, count in self.counts.items():
+            count += len(self.buffers.get(name, []))
+            filepath = os.path.join(self.output_dir, name, "activations.jsonl")
+            print(f"Saved {count} records to {filepath}")
+
+
 def save_records(all_records, output_dir):
-    """Save extracted records to JSON files, one per policy."""
+    """Save extracted records to JSON files, one per policy (legacy format)."""
     for policy_name, records in all_records.items():
         policy_dir = os.path.join(output_dir, policy_name)
         os.makedirs(policy_dir, exist_ok=True)
@@ -458,6 +535,12 @@ def main():
         help="Run a minimal smoke test (2 agents, 1 env, 10 steps) to verify the pipeline works",
     )
     parser.add_argument("--debug", action="store_true", help="Debug mode")
+    parser.add_argument(
+        "--streaming", action="store_true",
+        help="Stream records to JSONL incrementally (avoids OOM for large runs)")
+    parser.add_argument(
+        "--flush-interval", type=int, default=5000,
+        help="Records to buffer before flushing to disk (default: 5000, only with --streaming)")
     args = parser.parse_args()
 
     if args.list:
@@ -502,8 +585,11 @@ def main():
         runner = EvalRunner(policy_store_dir, debug=True)
         pufferl_data = runner.setup_evaluator(mode, args.task_file, args.seed)
 
-        records = evaluate_and_extract(pufferl_data, args.output_dir, args.num_episode)
-        save_records(records, args.output_dir)
+        records = evaluate_and_extract(
+            pufferl_data, args.output_dir, args.num_episode,
+            streaming=args.streaming, flush_interval=args.flush_interval)
+        if records is not None:
+            save_records(records, args.output_dir)
         clean_pufferl.close(pufferl_data)
     finally:
         shutil.rmtree(policy_store_dir)

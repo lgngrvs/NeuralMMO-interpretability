@@ -6,8 +6,11 @@ distinct behavioral features with large effect sizes vs random baselines.
 """
 
 import argparse
+import hashlib
 import json
+import multiprocessing
 import os
+import struct
 import sys
 import threading
 import time
@@ -161,58 +164,492 @@ def _is_alive(record):
     return False
 
 
+# ---------------------------------------------------------------------------
+# Fast binary-cache loader
+# ---------------------------------------------------------------------------
+# On first load of a JSONL file, we parse it in parallel, extract features,
+# filter dead agents, and save the results as .npz.  Subsequent loads just
+# mmap the .npz -- loading 500k records in seconds instead of 30+ minutes.
+# ---------------------------------------------------------------------------
+
+def _extract_features_from_record(r):
+    """Extract (activation, features_vec, step, env_id, agent_id) from one record.
+
+    Returns None if the agent is dead.
+    """
+    agent_id = r["agent_id"]
+    if agent_id == 0:
+        return None
+
+    obs = r["observation"]
+    entity_raw = obs["Entity"]
+
+    # Check alive inline -- avoid creating numpy array just for this
+    self_row_raw = None
+    for row in entity_raw:
+        if row[ENT_ID] == agent_id:
+            if row[ENT_HEALTH] <= 0:
+                return None
+            self_row_raw = row
+            break
+    if self_row_raw is None:
+        return None
+
+    action = r["action"]
+    entity = np.array(entity_raw, dtype=np.float32)
+    inventory = np.array(obs["Inventory"], dtype=np.float32)
+    tile = np.array(obs["Tile"], dtype=np.float32)
+    current_tick_raw = obs["CurrentTick"]
+    current_tick = float(current_tick_raw[0]) if isinstance(current_tick_raw, (list, np.ndarray)) else float(current_tick_raw)
+
+    # Visible entities: rows where id != 0
+    visible_mask = entity[:, ENT_ID] != 0
+    n_visible = visible_mask.sum()
+
+    visible_ents = entity[visible_mask]
+    npc_mask = visible_ents[:, ENT_NPC_TYPE] > 0
+    player_mask = visible_ents[:, ENT_NPC_TYPE] == 0
+
+    self_ent = entity[entity[:, ENT_ID] == agent_id][0]
+    self_health = self_ent[ENT_HEALTH]
+    self_food = self_ent[ENT_FOOD]
+    self_water = self_ent[ENT_WATER]
+    self_gold = self_ent[ENT_GOLD]
+    melee_lvl = self_ent[ENT_MELEE_LVL]
+    range_lvl = self_ent[ENT_RANGE_LVL]
+    mage_lvl = self_ent[ENT_MAGE_LVL]
+    max_combat = max(melee_lvl, range_lvl, mage_lvl)
+    in_combat = (self_ent[ENT_ATTACKER_ID] != 0 or
+                 (current_tick - self_ent[ENT_LATEST_COMBAT_TICK]) < 10)
+    self_damage = self_ent[ENT_DAMAGE]
+    self_r = self_ent[ENT_ROW]
+    self_c = self_ent[ENT_COL]
+    item_level = self_ent[ENT_ITEM_LEVEL]
+    time_alive = self_ent[ENT_TIME_ALIVE]
+    fishing_lvl = self_ent[ENT_FISHING_LVL]
+    herbalism_lvl = self_ent[ENT_HERBALISM_LVL]
+    prospecting_lvl = self_ent[ENT_PROSPECTING_LVL]
+    carving_lvl = self_ent[ENT_CARVING_LVL]
+    alchemy_lvl = self_ent[ENT_ALCHEMY_LVL]
+    max_harvest = max(fishing_lvl, herbalism_lvl, prospecting_lvl,
+                      carving_lvl, alchemy_lvl)
+    n_players = player_mask.sum() - 1  # Don't count self
+
+    # Nearest entity/player distances (Chebyshev)
+    if n_visible > 1:
+        others = visible_ents[visible_ents[:, ENT_ID] != agent_id]
+        if len(others) > 0:
+            dists = np.maximum(np.abs(others[:, ENT_ROW] - self_r),
+                               np.abs(others[:, ENT_COL] - self_c))
+            nearest_entity_dist = dists.min()
+            player_others = others[others[:, ENT_NPC_TYPE] == 0]
+            nearest_player_dist = (
+                np.maximum(np.abs(player_others[:, ENT_ROW] - self_r),
+                           np.abs(player_others[:, ENT_COL] - self_c)).min()
+                if len(player_others) > 0 else 99.0
+            )
+        else:
+            nearest_entity_dist = 99.0
+            nearest_player_dist = 99.0
+    else:
+        nearest_entity_dist = 99.0
+        nearest_player_dist = 99.0
+
+    # Inventory features
+    inv_mask = inventory[:, ITEM_ID] != 0
+    n_inv = inv_mask.sum()
+    n_equipped = (inventory[inv_mask, ITEM_EQUIPPED] > 0).sum() if n_inv > 0 else 0
+    n_listed = (inventory[inv_mask, ITEM_LISTED_PRICE] > 0).sum() if n_inv > 0 else 0
+
+    # Tile features
+    tile_mats = tile[:, TILE_MATERIAL]
+    n_water_tiles = ((tile_mats == MAT_WATER) | (tile_mats == MAT_OCEAN)).sum()
+    n_forest_tiles = ((tile_mats == MAT_FOILAGE) | (tile_mats == MAT_TREE)).sum()
+
+    # Action features
+    is_moving = action[ACT_MOVE_DIR] != ACT_MOVE_NOOP
+    is_attacking = action[ACT_ATTACK_TARGET] != ACT_ATTACK_NOOP
+    is_trading = (action[ACT_BUY_ITEM] != ACT_BUY_NOOP or
+                  action[ACT_SELL_ITEM] != ACT_SELL_NOOP or
+                  action[ACT_GIVE_ITEM] != ACT_GIVE_NOOP)
+    is_using_item = action[ACT_USE_ITEM] != ACT_USE_NOOP
+
+    feat = np.array([
+        n_visible, npc_mask.sum(), max(0, n_players),
+        nearest_entity_dist, nearest_player_dist,
+        self_health, self_food, self_water, self_gold,
+        max_combat, melee_lvl, range_lvl, mage_lvl,
+        float(in_combat), self_damage,
+        fishing_lvl, herbalism_lvl, prospecting_lvl,
+        carving_lvl, alchemy_lvl, max_harvest,
+        item_level, n_inv, n_equipped, n_listed,
+        self_r, self_c,
+        n_water_tiles, n_forest_tiles,
+        current_tick, time_alive,
+        float(is_moving), float(is_attacking),
+        float(is_trading), float(is_using_item),
+    ], dtype=np.float32)
+
+    return (
+        np.array(r["activation"], dtype=np.float32),
+        feat,
+        r["step"],
+        r["env_id"],
+        agent_id,
+    )
+
+
+def _process_chunk(args):
+    """Process a chunk of a JSONL file: parse JSON, filter dead, extract features.
+
+    args: (file_path, start_offset, end_offset, chunk_id)
+    Returns: (activations, features, steps, env_ids, agent_ids) as numpy arrays,
+             or None if no alive records found.
+    """
+    import orjson
+
+    file_path, start_offset, end_offset, chunk_id = args
+
+    activations_list = []
+    features_list = []
+    steps = []
+    env_ids = []
+    agent_ids = []
+
+    with open(file_path, "rb") as fh:
+        fh.seek(start_offset)
+        # If we're not at the start, skip partial first line
+        if start_offset > 0:
+            fh.readline()
+
+        while True:
+            pos = fh.tell()
+            if pos >= end_offset:
+                break
+            line = fh.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = orjson.loads(line)
+            except Exception:
+                continue
+
+            result = _extract_features_from_record(r)
+            if result is None:
+                continue
+
+            act, feat, step, env_id, agent_id = result
+            activations_list.append(act)
+            features_list.append(feat)
+            steps.append(step)
+            env_ids.append(env_id)
+            agent_ids.append(agent_id)
+
+    if not activations_list:
+        return None
+
+    return (
+        np.stack(activations_list),
+        np.stack(features_list),
+        np.array(steps, dtype=np.int64),
+        np.array(env_ids, dtype=np.int64),
+        np.array(agent_ids, dtype=np.int64),
+    )
+
+
+def _find_line_offsets(file_path, n_chunks):
+    """Find byte offsets that split a file into roughly equal chunks at line boundaries."""
+    file_size = os.path.getsize(file_path)
+    chunk_size = file_size // n_chunks
+    offsets = [0]
+
+    with open(file_path, "rb") as fh:
+        for i in range(1, n_chunks):
+            fh.seek(i * chunk_size)
+            fh.readline()  # skip to next line boundary
+            offsets.append(fh.tell())
+
+    offsets.append(file_size)
+    return offsets
+
+
+def _cache_path_for_file(json_file):
+    """Return the path for the binary cache of a given JSONL file."""
+    return json_file.with_suffix(".cache.npz")
+
+
+def _build_cache_parallel(json_file, n_workers=None):
+    """Parse a JSONL file in parallel, extract features, and save as .npz cache.
+
+    Returns (activations, features, steps, env_ids, agent_ids) numpy arrays
+    for all alive records.
+    """
+    import orjson
+
+    file_size = os.path.getsize(json_file)
+    if n_workers is None:
+        # Use many workers but cap at a reasonable number
+        n_workers = min(multiprocessing.cpu_count(), 64)
+
+    print(f"  Building cache with {n_workers} workers...", flush=True)
+
+    if str(json_file).endswith(".jsonl"):
+        offsets = _find_line_offsets(str(json_file), n_workers)
+        chunk_args = [
+            (str(json_file), offsets[i], offsets[i + 1], i)
+            for i in range(len(offsets) - 1)
+        ]
+
+        with multiprocessing.Pool(n_workers) as pool:
+            results = list(tqdm(
+                pool.imap(_process_chunk, chunk_args),
+                total=len(chunk_args),
+                desc="Processing chunks",
+                unit="chunk",
+            ))
+    else:
+        # .json file: load all at once, then process in parallel via chunks
+        with open(json_file, "rb") as fh:
+            all_records = orjson.loads(fh.read())
+        # Process sequentially for .json (rare case)
+        results = []
+        acts, feats, ss, es, as_ = [], [], [], [], []
+        for r in tqdm(all_records, desc="Processing records", unit="rec"):
+            result = _extract_features_from_record(r)
+            if result is not None:
+                act, feat, step, env_id, agent_id = result
+                acts.append(act)
+                feats.append(feat)
+                ss.append(step)
+                es.append(env_id)
+                as_.append(agent_id)
+        if acts:
+            results = [(np.stack(acts), np.stack(feats),
+                        np.array(ss, dtype=np.int64),
+                        np.array(es, dtype=np.int64),
+                        np.array(as_, dtype=np.int64))]
+
+    # Merge results from all chunks
+    valid_results = [r for r in results if r is not None]
+    if not valid_results:
+        raise ValueError(f"No alive records found in {json_file}")
+
+    all_acts = np.concatenate([r[0] for r in valid_results])
+    all_feats = np.concatenate([r[1] for r in valid_results])
+    all_steps = np.concatenate([r[2] for r in valid_results])
+    all_envs = np.concatenate([r[3] for r in valid_results])
+    all_agents = np.concatenate([r[4] for r in valid_results])
+
+    # Save cache
+    cache_file = _cache_path_for_file(json_file)
+    print(f"  Saving cache to {cache_file.name} ...", flush=True)
+    np.savez(
+        cache_file,
+        activations=all_acts,
+        features=all_feats,
+        steps=all_steps,
+        env_ids=all_envs,
+        agent_ids=all_agents,
+    )
+    cache_size = os.path.getsize(cache_file)
+    print(f"  Cache saved ({cache_size / 1024 / 1024:.0f} MB)", flush=True)
+
+    return all_acts, all_feats, all_steps, all_envs, all_agents
+
+
+def _load_or_build_cache(json_file):
+    """Load from binary cache if available, otherwise build it.
+
+    Returns (activations, features, steps, env_ids, agent_ids) numpy arrays.
+    """
+    cache_file = _cache_path_for_file(json_file)
+    file_size = os.path.getsize(json_file)
+
+    if cache_file.exists():
+        cache_mtime = os.path.getmtime(cache_file)
+        source_mtime = os.path.getmtime(json_file)
+        if cache_mtime > source_mtime:
+            print(f"  Loading from cache {cache_file.name}...", flush=True)
+            data = np.load(cache_file)
+            print(f"  Cache loaded: {len(data['activations'])} alive records", flush=True)
+            return (
+                data["activations"],
+                data["features"],
+                data["steps"],
+                data["env_ids"],
+                data["agent_ids"],
+            )
+        else:
+            print(f"  Cache outdated, rebuilding...", flush=True)
+
+    return _build_cache_parallel(json_file)
+
+
 def load_data(path, subsample_rate=10):
     """Load activation records from a directory, subsampling per trajectory.
 
     Filters out dead agent timesteps before subsampling.
     Returns (subsampled_records, total_datapoints) where total_datapoints is the
     count before subsampling/filtering.
+
+    When a binary cache (.cache.npz) exists and is newer than the source file,
+    loading is near-instant.  Otherwise the cache is built in parallel on first
+    load (takes a few minutes once, then cached for future runs).
+
+    The returned records are lightweight dicts with pre-computed numpy arrays
+    stored in a _precomputed_arrays attribute on the list for use by
+    compute_features().
     """
-    all_records = []
-    total_datapoints = 0
     data_dir = Path(path)
 
     json_files = list(data_dir.rglob("activations.json"))
-    if not json_files:
-        raise FileNotFoundError(f"No activations.json found under {path}")
+    jsonl_files = list(data_dir.rglob("activations.jsonl"))
+    all_data_files = json_files + jsonl_files
+    if not all_data_files:
+        raise FileNotFoundError(f"No activations.json or activations.jsonl found under {path}")
 
-    for json_file in json_files:
+    all_activations = []
+    all_features = []
+    all_steps = []
+    all_env_ids = []
+    all_agent_ids = []
+    total_datapoints = 0
+
+    for json_file in all_data_files:
         file_size = os.path.getsize(json_file)
-        import orjson
         print(f"Loading {json_file.name} ({file_size / 1024 / 1024:.0f} MB)...",
               flush=True)
-        with open(json_file, "rb") as fh:
-            records = orjson.loads(fh.read())
-        total_datapoints += len(records)
-        print(f"  {len(records)} records loaded")
 
-        # Filter out dead timesteps
-        alive_records = []
-        n_dead = 0
-        for r in tqdm(records, desc="Filtering dead timesteps", unit="rec"):
-            if _is_alive(r):
-                alive_records.append(r)
-            else:
-                n_dead += 1
-        print(f"  {n_dead} dead timesteps removed, {len(alive_records)} alive "
-              f"({n_dead / len(records) * 100:.1f}% dead)")
+        acts, feats, steps, env_ids, agent_ids = _load_or_build_cache(json_file)
 
-        # Group by trajectory (env_id, agent_id)
-        trajectories = defaultdict(list)
-        for r in tqdm(alive_records, desc="Grouping records", unit="rec"):
-            trajectories[(r["env_id"], r["agent_id"])].append(r)
+        # Count total records (alive records in cache; estimate total from file)
+        n_alive = len(acts)
+        # We don't know exact total without parsing, but we can estimate
+        # For reporting purposes, use alive count as lower bound
+        total_datapoints += n_alive  # Will be updated below if we can count
 
-        # Sort each trajectory by step and subsample
-        for key in tqdm(trajectories, desc="Subsampling trajectories", unit="traj"):
-            traj = sorted(trajectories[key], key=lambda r: r["step"])
-            all_records.extend(traj[::max(subsample_rate, 1)])
+        # Try to get actual total line count from a sidecar or estimate
+        # For JSONL, estimate from file size and average line size
+        if json_file.suffix == ".jsonl":
+            avg_line_size = file_size / max(n_alive, 1)
+            estimated_total = int(file_size / avg_line_size) if avg_line_size > 0 else n_alive
+            total_datapoints = total_datapoints - n_alive + estimated_total
 
-    print(f"Loaded {total_datapoints} records, {len(all_records)} after filtering + subsampling (rate={subsample_rate})")
-    return all_records, total_datapoints
+        print(f"  {n_alive} alive records", flush=True)
+
+        # Subsample per trajectory: group by (env_id, agent_id), sort by step, keep every Nth
+        if subsample_rate and subsample_rate > 1:
+            # Build trajectory groups using numpy operations
+            traj_keys = env_ids.astype(np.int64) * 1_000_000 + agent_ids.astype(np.int64)
+            unique_keys = np.unique(traj_keys)
+
+            keep_mask = np.zeros(len(acts), dtype=bool)
+            for key in unique_keys:
+                mask = traj_keys == key
+                indices = np.where(mask)[0]
+                # Sort by step within trajectory
+                sorted_order = np.argsort(steps[indices])
+                sorted_indices = indices[sorted_order]
+                # Keep every Nth
+                keep_mask[sorted_indices[::subsample_rate]] = True
+
+            acts = acts[keep_mask]
+            feats = feats[keep_mask]
+            steps = steps[keep_mask]
+            env_ids = env_ids[keep_mask]
+            agent_ids = agent_ids[keep_mask]
+            print(f"  {keep_mask.sum()} records after subsampling (rate={subsample_rate})", flush=True)
+
+        all_activations.append(acts)
+        all_features.append(feats)
+        all_steps.append(steps)
+        all_env_ids.append(env_ids)
+        all_agent_ids.append(agent_ids)
+
+    # Concatenate across files
+    final_acts = np.concatenate(all_activations)
+    final_feats = np.concatenate(all_features)
+    final_steps = np.concatenate(all_steps)
+    final_env_ids = np.concatenate(all_env_ids)
+    final_agent_ids = np.concatenate(all_agent_ids)
+
+    n_final = len(final_acts)
+    print(f"Loaded {total_datapoints} records, {n_final} after filtering + subsampling (rate={subsample_rate})")
+
+    # Build lightweight record dicts for backward compatibility.
+    # The actual numpy data is passed through a _precomputed attribute on the list.
+    records = _PrecomputedRecordList(final_acts, final_feats, final_steps,
+                                     final_env_ids, final_agent_ids)
+
+    return records, total_datapoints
+
+
+class _PrecomputedRecordList:
+    """A list-like object that carries precomputed numpy arrays.
+
+    Supports len() and iteration for backward compatibility, but the real data
+    lives in the numpy arrays accessed by compute_features().
+    """
+
+    def __init__(self, activations, features, steps, env_ids, agent_ids):
+        self._activations = activations
+        self._features = features
+        self._steps = steps
+        self._env_ids = env_ids
+        self._agent_ids = agent_ids
+        self._n = len(activations)
+
+    def __len__(self):
+        return self._n
+
+    def __iter__(self):
+        """Yield lightweight dicts for backward compatibility."""
+        for i in range(self._n):
+            yield {
+                "activation": self._activations[i],
+                "step": int(self._steps[i]),
+                "env_id": int(self._env_ids[i]),
+                "agent_id": int(self._agent_ids[i]),
+            }
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            new = _PrecomputedRecordList(
+                self._activations[idx],
+                self._features[idx],
+                self._steps[idx],
+                self._env_ids[idx],
+                self._agent_ids[idx],
+            )
+            return new
+        return {
+            "activation": self._activations[idx],
+            "step": int(self._steps[idx]),
+            "env_id": int(self._env_ids[idx]),
+            "agent_id": int(self._agent_ids[idx]),
+        }
 
 
 def compute_features(records):
-    """Extract activations, interpretable features, and metadata from records."""
+    """Extract activations, interpretable features, and metadata from records.
+
+    If records is a _PrecomputedRecordList (from the fast loader), this returns
+    the precomputed arrays directly -- essentially a no-op.
+    Falls back to the original per-record extraction for plain lists.
+    """
+    if isinstance(records, _PrecomputedRecordList):
+        N = len(records)
+        metadata = {
+            "step": records._steps.astype(int),
+            "env_id": records._env_ids.astype(int),
+            "agent_id": records._agent_ids.astype(int),
+        }
+        return records._activations.copy(), records._features.copy(), metadata
+
+    # Fallback: original slow path for plain list of dicts
     N = len(records)
     activations = np.zeros((N, len(records[0]["activation"])), dtype=np.float32)
     features = np.zeros((N, len(FEATURE_NAMES)), dtype=np.float32)

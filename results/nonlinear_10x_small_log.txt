@@ -1,0 +1,109 @@
+Loading activation data...
+Loading activations.jsonl (31192 MB)...
+  Loading from cache activations.cache.npz...
+  Cache loaded: 280332 alive records
+  280332 alive records
+  28089 records after subsampling (rate=10)
+Loaded 280332 records, 28089 after filtering + subsampling (rate=10)
+Total raw records: 280332, after subsampling: 28089
+Computing features...
+Activations shape: (28089, 256)
+Features shape:    (28089, 35)
+
+Training nonlinear (MLP) probes...
+Split: 22002 train, 6087 test (21.7% test)
+PCA: 50 components, 69.9% variance explained
+  n_visible_entities         R²=0.492
+  n_visible_npcs             R²=0.291
+  n_visible_players          R²=0.610
+  nearest_entity_dist        R²=0.154
+  nearest_player_dist        R²=0.380
+  self_health                R²=0.485
+  self_food                  R²=0.659
+  self_water                 R²=0.651
+  self_gold                  R²=0.193
+  max_combat_level           R²=0.822
+  melee_level                R²=0.807
+  range_level                R²=0.789
+  mage_level                 R²=0.770
+  in_combat                  AUC=0.790
+  self_damage                R²=0.488
+  fishing_level              R²=0.631
+  herbalism_level            R²=0.578
+  prospecting_level          R²=0.593
+  carving_level              R²=0.640
+  alchemy_level              R²=0.339
+  max_harvest_level          R²=0.640
+  item_level                 R²=0.020
+  n_inventory_items          R²=0.173
+  n_equipped_items           R²=0.037
+  n_listed_items             R²=-0.054
+  self_row                   R²=0.843
+  self_col                   R²=0.873
+  n_water_tiles              R²=0.237
+  n_forest_tiles             R²=0.524
+  tick                       R²=0.912
+  time_alive                 R²=0.912
+  is_moving                  AUC=0.591
+  is_attacking               AUC=0.758
+  is_trading                 AUC=0.710
+  is_using_item              AUC=0.709
+
+==========================================================================================
+LINEAR PROBE RESULTS SUMMARY
+==========================================================================================
+
+Feature                   Type   Metric     Full      PCA  Shuffle
+----------------------------------------------------------------------
+n_visible_entities        cont   R²       0.4924  -0.5914  -0.0853
+n_visible_npcs            cont   R²       0.2908   0.1028  -0.0895
+n_visible_players         cont   R²       0.6096   0.3524  -0.1081
+nearest_entity_dist       cont   R²       0.1539  -0.0644  -0.0372
+nearest_player_dist       cont   R²       0.3798  -0.3984  -0.0302
+self_health               cont   R²       0.4851 -26.2042  -0.2966
+self_food                 cont   R²       0.6594 -10.7576  -0.1930
+self_water                cont   R²       0.6513 -14.0313  -0.1753
+self_gold                 cont   R²       0.1927  -0.0529  -0.0906
+max_combat_level          cont   R²       0.8220  -0.0167  -0.1321
+melee_level               cont   R²       0.8068  -0.0159  -0.1337
+range_level               cont   R²       0.7889  -0.0237  -0.1226
+mage_level                cont   R²       0.7704  -0.0160  -0.1021
+in_combat                 bin    AUC      0.7901   0.7784   0.5034
+self_damage               cont   R²       0.4882   0.1708  -0.0836
+fishing_level             cont   R²       0.6315  -0.0042  -0.0943
+herbalism_level           cont   R²       0.5781  -0.0099  -0.1068
+prospecting_level         cont   R²       0.5929  -0.0012  -0.0934
+carving_level             cont   R²       0.6403  -0.0002  -0.1778
+alchemy_level             cont   R²       0.3385  -0.0001  -0.1515
+max_harvest_level         cont   R²       0.6398  -0.0067  -0.1254
+item_level                cont   R²       0.0200   0.1007  -0.1529
+n_inventory_items         cont   R²       0.1730   0.1412  -0.0999
+n_equipped_items          cont   R²       0.0366   0.0957  -0.1433
+n_listed_items            cont   R²      -0.0542  -0.0014  -0.1062
+self_row                  cont   R²       0.8428  -2.4844  -0.0564
+self_col                  cont   R²       0.8728  -2.6537  -0.0639
+n_water_tiles             cont   R²       0.2372  -6.4005  -0.1194
+n_forest_tiles            cont   R²       0.5245  -4.9569  -0.0656
+tick                      cont   R²       0.9121  -0.7615  -0.0232
+time_alive                cont   R²       0.9121  -0.7615  -0.0315
+is_moving                 bin    AUC      0.5907   0.5319   0.5373
+is_attacking              bin    AUC      0.7577   0.7644   0.5055
+is_trading                bin    AUC      0.7102   0.7253   0.5483
+is_using_item             bin    AUC      0.7093   0.7158   0.4962
+
+Binary feature detail:
+Feature                       Acc     AUC    Prec     Rec      F1  Train+   Test+
+--------------------------------------------------------------------------------
+in_combat                   0.764   0.790   0.817   0.878   0.846   75.3%   74.2%
+is_moving                   0.908   0.591   0.915   0.991   0.952   91.5%   91.5%
+is_attacking                0.714   0.758   0.686   0.572   0.624   42.1%   41.4%
+is_trading                  0.868   0.710   0.248   0.038   0.065   10.3%   12.2%
+is_using_item               0.824   0.709   0.316   0.100   0.152   15.0%   15.8%
+
+Saved results/nonlinear_10x_small/mlp_probe_weights.pt
+Saved results/nonlinear_10x_small/mlp_probe_pca.pkl
+Saved results/nonlinear_10x_small/probe_summary.png
+Saved results/nonlinear_10x_small/probe_binary_details.png
+Saved results/nonlinear_10x_small/probe_direction_similarity.png
+
+All outputs saved to results/nonlinear_10x_small

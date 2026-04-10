@@ -56,7 +56,19 @@ def trajectory_split(metadata, test_frac=0.2, seed=42):
 # Probe training
 # ---------------------------------------------------------------------------
 
-def train_probe(X_train, y_train, X_test, y_test, binary=False, alpha=1.0, seed=42):
+def _compute_sample_weights_balanced(y, n_bins=10):
+    """Compute sample weights inversely proportional to quantile-bin frequency."""
+    try:
+        bin_edges = np.quantile(y, np.linspace(0, 1, n_bins + 1))
+        bin_indices = np.clip(np.digitize(y, bin_edges, right=True), 1, n_bins)
+    except Exception:
+        return np.ones(len(y))
+    bin_counts = np.maximum(np.bincount(bin_indices, minlength=n_bins + 1), 1)
+    return len(y) / (n_bins * bin_counts[bin_indices].astype(float))
+
+
+def train_probe(X_train, y_train, X_test, y_test, binary=False, alpha=1.0,
+                class_weight=None, seed=42):
     """Train a single linear probe and return metrics + weight vector.
 
     Returns dict with metrics and the learned direction (coef).
@@ -88,6 +100,7 @@ def train_probe(X_train, y_train, X_test, y_test, binary=False, alpha=1.0, seed=
             C=1.0 / max(alpha, 1e-8),
             max_iter=2000,
             solver="lbfgs",
+            class_weight=class_weight,
             random_state=seed,
         )
         model.fit(X_train_s, y_train)
@@ -106,7 +119,10 @@ def train_probe(X_train, y_train, X_test, y_test, binary=False, alpha=1.0, seed=
         result["test_pos_rate"] = y_test.mean()
     else:
         model = Ridge(alpha=alpha, random_state=seed)
-        model.fit(X_train_s, y_train)
+        sample_weight = None
+        if class_weight == "balanced":
+            sample_weight = _compute_sample_weights_balanced(y_train)
+        model.fit(X_train_s, y_train, sample_weight=sample_weight)
         y_pred = model.predict(X_test_s)
 
         result["r2"] = r2_score(y_test, y_pred)
@@ -121,7 +137,7 @@ def train_probe(X_train, y_train, X_test, y_test, binary=False, alpha=1.0, seed=
 
 
 def train_all_probes(activations, features, metadata, n_pca=50, alpha=1.0,
-                     test_frac=0.2, seed=42):
+                     test_frac=0.2, class_weight=None, seed=42):
     """Train probes for all features under three conditions: full, PCA, shuffle.
 
     Returns a dict: {feature_name: {"full": result, "pca": result, "shuffle": result}}
@@ -162,7 +178,7 @@ def train_all_probes(activations, features, metadata, n_pca=50, alpha=1.0,
         results[fname] = {}
         for cond_name, (Xtr, Xte, ytr, yte) in conditions.items():
             res = train_probe(Xtr, ytr, Xte, yte, binary=binary, alpha=alpha,
-                              seed=seed)
+                              class_weight=class_weight, seed=seed)
             results[fname][cond_name] = res
 
         # Progress line
@@ -430,6 +446,9 @@ def main():
                         help="Number of PCA components for reduced baseline (default: 50)")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: <data_dir>/probe_results)")
+    parser.add_argument("--class-weight", type=str, default="none",
+                        choices=["none", "balanced"],
+                        help="Class reweighting strategy (default: none)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
@@ -448,10 +467,13 @@ def main():
 
     # Train probes
     print("\nTraining linear probes...")
+    class_weight = None if args.class_weight == "none" else args.class_weight
+
     results, pca = train_all_probes(
         activations, features, metadata,
         n_pca=args.n_pca, alpha=args.alpha,
-        test_frac=args.test_frac, seed=args.seed,
+        test_frac=args.test_frac, class_weight=class_weight,
+        seed=args.seed,
     )
 
     # Report
