@@ -814,6 +814,30 @@ def run_umap(activations, n_neighbors=15, min_dist=0.1, n_components=2,
     return embedding, reducer
 
 
+def run_tsne(activations, perplexity=30, learning_rate="auto",
+             early_exaggeration=12.0, max_iter=1000, n_components=2,
+             random_state=42):
+    """Reduce activations with T-SNE.
+
+    Returns (embedding, None).  T-SNE does not produce a reusable model
+    (no ``transform()`` method), so the second element is always *None*.
+    """
+    from sklearn.manifold import TSNE
+
+    tsne = TSNE(
+        n_components=n_components,
+        perplexity=perplexity,
+        learning_rate=learning_rate,
+        early_exaggeration=early_exaggeration,
+        max_iter=max_iter,
+        random_state=random_state,
+        verbose=1,
+    )
+    with spinner(f"Running T-SNE (perplexity={perplexity}, max_iter={max_iter})"):
+        embedding = tsne.fit_transform(activations)
+    return embedding, None
+
+
 def run_hdbscan(embedding, min_cluster_size=15, min_samples=5):
     """Cluster UMAP embedding with HDBSCAN.
 
@@ -944,12 +968,14 @@ def compute_rolling_features(features, metadata, window=5):
     return rolling
 
 
-def generate_metric_umap(embedding, rolling_features, output_dir):
-    """Generate a grid of UMAP scatter plots colored by rolling-average feature values."""
+def generate_metric_umap(embedding, rolling_features, output_dir,
+                         reduction_method="UMAP"):
+    """Generate a grid of embedding scatter plots colored by rolling-average feature values."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    method_lower = reduction_method.lower().replace("-", "")  # "tsne" or "umap"
     n_features = len(FEATURE_NAMES)
     ncols = 2
     nrows = (n_features + 1) // 2
@@ -991,9 +1017,10 @@ def generate_metric_umap(embedding, rolling_features, output_dir):
     for i in range(n_features, len(axes)):
         axes[i].set_visible(False)
 
-    fig.suptitle("UMAP Colored by Rolling-Average Feature Values", fontsize=14, y=1.01)
+    fig.suptitle(f"{reduction_method} Colored by Rolling-Average Feature Values",
+                 fontsize=14, y=1.01)
     fig.tight_layout()
-    path = os.path.join(output_dir, "umap_metric_scatter.png")
+    path = os.path.join(output_dir, f"{method_lower}_metric_scatter.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Wrote {path}")
@@ -1356,8 +1383,9 @@ def _write_feature_heatmap(stats, output_dir):
     print(f"  Wrote {feat_path}")
 
 
-def generate_outputs(embedding, labels, features, stats, output_dir):
-    """Generate summary text, UMAP scatter, and feature heatmap."""
+def generate_outputs(embedding, labels, features, stats, output_dir,
+                     reduction_method="UMAP"):
+    """Generate summary text, embedding scatter, and feature heatmap."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -1366,7 +1394,8 @@ def generate_outputs(embedding, labels, features, stats, output_dir):
 
     _write_summary(labels, stats, output_dir)
 
-    # --- umap_scatter.png ---
+    # --- embedding scatter ---
+    method_lower = reduction_method.lower().replace("-", "")  # "tsne" or "umap"
     fig, ax = plt.subplots(figsize=(10, 8))
     noise_mask = labels == -1
     if noise_mask.any():
@@ -1378,15 +1407,15 @@ def generate_outputs(embedding, labels, features, stats, output_dir):
         mask = labels == label
         ax.scatter(embedding[mask, 0], embedding[mask, 1],
                    c=[cmap(i)], s=3, alpha=0.5, label=f"C{label}")
-    ax.set_title("UMAP Embedding Colored by HDBSCAN Cluster")
-    ax.set_xlabel("UMAP 1")
-    ax.set_ylabel("UMAP 2")
+    ax.set_title(f"{reduction_method} Embedding Colored by HDBSCAN Cluster")
+    ax.set_xlabel(f"{reduction_method} 1")
+    ax.set_ylabel(f"{reduction_method} 2")
     if len(cluster_labels) <= 20:
         ax.legend(markerscale=4, fontsize=8)
     abs_output_dir = os.path.abspath(output_dir)
     ax.text(1.0, -0.02, abs_output_dir, ha="right", va="top",
             fontsize=5, color="gray", family="monospace", transform=ax.transAxes)
-    scatter_path = os.path.join(output_dir, "umap_scatter.png")
+    scatter_path = os.path.join(output_dir, f"{method_lower}_scatter.png")
     fig.savefig(scatter_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Wrote {scatter_path}")
@@ -1604,6 +1633,16 @@ def main():
                         help="Generate interactive Plotly HTML for scrubbing through HDBSCAN's "
                              "condensed tree hierarchy on the UMAP scatter. "
                              "Requires --cluster-before-umap.")
+    parser.add_argument("--tsne", action="store_true",
+                        help="Use T-SNE instead of UMAP for 2D dimensionality reduction.")
+    parser.add_argument("--tsne-perplexity", type=float, default=30,
+                        help="T-SNE perplexity (default: 30)")
+    parser.add_argument("--tsne-learning-rate", type=str, default="auto",
+                        help="T-SNE learning rate (default: 'auto'; use a number for a fixed rate)")
+    parser.add_argument("--tsne-early-exaggeration", type=float, default=12.0,
+                        help="T-SNE early exaggeration factor (default: 12.0)")
+    parser.add_argument("--tsne-max-iter", type=int, default=1000,
+                        help="T-SNE max iterations (default: 1000)")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: auto-named under analysis_results/)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -1616,12 +1655,23 @@ def main():
               f"{args.hdbscan_min_cluster}. Try --subsample 1.")
         return
 
+    # Parse T-SNE learning rate (can be "auto" or a float)
+    tsne_lr = args.tsne_learning_rate
+    if tsne_lr != "auto":
+        try:
+            tsne_lr = float(tsne_lr)
+        except ValueError:
+            print(f"ERROR: --tsne-learning-rate must be 'auto' or a number, got '{tsne_lr}'")
+            return
+
     # Auto-name output dir: analysis_results/policy-N-subM-cK
     if args.output_dir is None:
         policy_name = data_dir.name
+        reduction_tag = "-tsne" if args.tsne else ""
         dirname = (f"{policy_name}-{total_datapoints}"
                    f"-sub{args.subsample}-c{args.hdbscan_min_cluster}"
-                   f"{f'-pca{args.pre_cluster_dims}' if args.cluster_before_umap else ''}")
+                   f"{f'-pca{args.pre_cluster_dims}' if args.cluster_before_umap else ''}"
+                   f"{reduction_tag}")
         output_dir = os.path.join("analysis_results", dirname)
     else:
         output_dir = args.output_dir
@@ -1630,12 +1680,21 @@ def main():
 
     print(f"\nActivations: {activations.shape}, Features: {features.shape}", flush=True)
 
-    # --- Run 2D UMAP (unless --metric-only) ---
+    # --- Run 2D embedding (UMAP or T-SNE, unless --metric-only) ---
     embedding = umap_reducer = None
     if not args.metric_only:
-        print(f"Running UMAP on {activations.shape[0]} points...", flush=True)
-        embedding, umap_reducer = run_umap(activations, n_neighbors=args.umap_neighbors,
-                                           random_state=args.seed)
+        if args.tsne:
+            print(f"Running T-SNE on {activations.shape[0]} points...", flush=True)
+            embedding, _ = run_tsne(activations,
+                                    perplexity=args.tsne_perplexity,
+                                    learning_rate=tsne_lr,
+                                    early_exaggeration=args.tsne_early_exaggeration,
+                                    max_iter=args.tsne_max_iter,
+                                    random_state=args.seed)
+        else:
+            print(f"Running UMAP on {activations.shape[0]} points...", flush=True)
+            embedding, umap_reducer = run_umap(activations, n_neighbors=args.umap_neighbors,
+                                               random_state=args.seed)
 
     # --- Run PCA if requested ---
     labels = hdbscan_clusterer = pca = activations_reduced = None
@@ -1668,16 +1727,20 @@ def main():
     # --- Generate outputs ---
     os.makedirs(output_dir, exist_ok=True)
     print(f"\nWriting outputs to {output_dir}/")
+    reduction_method = "T-SNE" if args.tsne else "UMAP"
+    method_lower = reduction_method.lower().replace("-", "")  # "tsne" or "umap"
     imgs = []
 
     if labels is not None:
         stats = compute_cluster_stats(features, labels, metadata, rng_seed=args.seed)
-        generate_outputs(embedding, labels, features, stats, output_dir)
-        imgs += ["umap_scatter.png", "cluster_features.png"]
+        generate_outputs(embedding, labels, features, stats, output_dir,
+                         reduction_method=reduction_method)
+        imgs += [f"{method_lower}_scatter.png", "cluster_features.png"]
 
     if embedding is not None:
-        generate_metric_umap(embedding, rolling_features, output_dir)
-        imgs.append("umap_metric_scatter.png")
+        generate_metric_umap(embedding, rolling_features, output_dir,
+                             reduction_method=reduction_method)
+        imgs.append(f"{method_lower}_metric_scatter.png")
 
     if args.feature_scatter:
         generate_feature_scatter(rolling_features, output_dir)

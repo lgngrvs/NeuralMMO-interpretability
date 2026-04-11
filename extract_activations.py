@@ -155,8 +155,36 @@ def get_inner_policy(agent):
     return policy
 
 
-def register_hooks(data):
+def get_recurrent_wrapper(agent):
+    """Navigate wrapper layers to get the RecurrentWrapper (which has .recurrent LSTM).
+
+    Structure: RecurrentPolicy -> .policy (RecurrentWrapper)
+    The RecurrentWrapper has .recurrent (nn.LSTM) and .policy (base Policy).
+    """
+    policy = agent
+    # Navigate through wrappers until we find the one with 'recurrent'
+    while hasattr(policy, "policy"):
+        if hasattr(policy, "recurrent"):
+            return policy
+        policy = policy.policy
+    if hasattr(policy, "recurrent"):
+        return policy
+    raise AttributeError("Could not find RecurrentWrapper with 'recurrent' attribute")
+
+
+LAYER_CHOICES = ["action_decoder", "lstm_cell", "lstm_hidden", "encoder_output"]
+
+
+def register_hooks(data, layer="action_decoder"):
     """Register activation capture hooks on all policies in the pool.
+
+    Args:
+        data: pufferl data object with policy_pool.
+        layer: which layer to hook. One of:
+            - 'action_decoder': input to action decoder (args[0]), default
+            - 'lstm_cell': LSTM cell state, last layer (c_n[-1])
+            - 'lstm_hidden': LSTM hidden state, last layer (h_n[-1])
+            - 'encoder_output': output of proj_fc (pre-LSTM)
 
     Returns (activation_buffers, hook_handles) where activation_buffers is a
     dict mapping policy_id -> list that the hooks append to, and hook_handles
@@ -178,12 +206,62 @@ def register_hooks(data):
         buf = []
         activation_buffers[policy_id] = {"name": name, "buffer": buf}
 
-        def make_hook(buffer):
-            def hook(module, args, output):
-                buffer.append(args[0].detach().cpu())
-            return hook
+        if layer == "action_decoder":
+            # Original behavior: capture args[0] (hidden state input to action decoder)
+            def make_hook(buffer):
+                def hook(module, args, output):
+                    buffer.append(args[0].detach().cpu())
+                return hook
 
-        handle = inner.action_decoder.register_forward_hook(make_hook(buf))
+            handle = inner.action_decoder.register_forward_hook(make_hook(buf))
+
+        elif layer == "lstm_cell":
+            # Hook on nn.LSTM: output = (output_tensor, (h_n, c_n))
+            # c_n shape: (num_layers, batch, hidden_size)
+            # We want c_n[-1]: last layer cell state
+            recurrent_wrapper = get_recurrent_wrapper(agent)
+
+            def make_lstm_cell_hook(buffer):
+                def hook(module, input, output):
+                    # output is (output_tensor, (h_n, c_n))
+                    c_n = output[1][1]  # cell state
+                    # c_n shape: (num_layers, seq_len_or_batch, hidden_size)
+                    # Take last layer
+                    last_layer_cell = c_n[-1]  # shape: (batch, hidden_size)
+                    buffer.append(last_layer_cell.detach().cpu())
+                return hook
+
+            handle = recurrent_wrapper.recurrent.register_forward_hook(
+                make_lstm_cell_hook(buf))
+
+        elif layer == "lstm_hidden":
+            # Hook on nn.LSTM: output = (output_tensor, (h_n, c_n))
+            # h_n shape: (num_layers, batch, hidden_size)
+            # We want h_n[-1]: last layer hidden state
+            recurrent_wrapper = get_recurrent_wrapper(agent)
+
+            def make_lstm_hidden_hook(buffer):
+                def hook(module, input, output):
+                    h_n = output[1][0]  # hidden state
+                    last_layer_hidden = h_n[-1]  # shape: (batch, hidden_size)
+                    buffer.append(last_layer_hidden.detach().cpu())
+                return hook
+
+            handle = recurrent_wrapper.recurrent.register_forward_hook(
+                make_lstm_hidden_hook(buf))
+
+        elif layer == "encoder_output":
+            # Hook on proj_fc: output shape (batch, 256)
+            def make_proj_hook(buffer):
+                def hook(module, input, output):
+                    buffer.append(output.detach().cpu())
+                return hook
+
+            handle = inner.proj_fc.register_forward_hook(make_proj_hook(buf))
+
+        else:
+            raise ValueError(f"Unknown layer: {layer}")
+
         hook_handles.append(handle)
 
     return activation_buffers, hook_handles
@@ -237,7 +315,7 @@ def build_observation_record(env_outputs, idx):
 
 
 def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
-                         streaming=False, flush_interval=5000):
+                         streaming=False, flush_interval=5000, layer="action_decoder"):
     """Run evaluation while extracting activations, observations, and actions.
 
     Args:
@@ -245,12 +323,13 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
                    Useful for smoke testing.
         streaming: If True, write records to JSONL incrementally to avoid OOM.
         flush_interval: How often to flush records to disk (only used if streaming=True).
+        layer: Which layer to hook for activation extraction. See register_hooks().
     """
     config = data.config
     inner_policy = get_inner_policy(data.agent)
     unflatten_context = inner_policy.unflatten_context
 
-    activation_buffers, hook_handles = register_hooks(data)
+    activation_buffers, hook_handles = register_hooks(data, layer=layer)
     index_to_policy = build_policy_index_map(data)
 
     # Build a mapping from batch index -> position within that policy's subset.
@@ -541,6 +620,14 @@ def main():
     parser.add_argument(
         "--flush-interval", type=int, default=5000,
         help="Records to buffer before flushing to disk (default: 5000, only with --streaming)")
+    parser.add_argument(
+        "--layer", type=str, default="action_decoder",
+        choices=LAYER_CHOICES,
+        help="Which layer to extract activations from (default: action_decoder). "
+        "Options: action_decoder (input to action heads), "
+        "lstm_cell (LSTM cell state, last layer), "
+        "lstm_hidden (LSTM hidden state, last layer), "
+        "encoder_output (proj_fc output, pre-LSTM)")
     args = parser.parse_args()
 
     if args.list:
@@ -557,11 +644,12 @@ def main():
         policy_store_dir = prepare_policy_dir(policies, args.policies_dir)
         try:
             print(f"Smoke test: {SMOKE_NUM_AGENTS} agents, {SMOKE_NUM_ENVS} env, "
-                  f"{SMOKE_HORIZON} steps")
+                  f"{SMOKE_HORIZON} steps, layer={args.layer}")
             pufferl_data = setup_smoke_test(policy_store_dir, args.task_file, args.seed)
 
             records = evaluate_and_extract(
-                pufferl_data, args.output_dir, num_eval_episode=0, max_steps=SMOKE_HORIZON
+                pufferl_data, args.output_dir, num_eval_episode=0,
+                max_steps=SMOKE_HORIZON, layer=args.layer,
             )
             save_records(records, args.output_dir)
 
@@ -587,7 +675,8 @@ def main():
 
         records = evaluate_and_extract(
             pufferl_data, args.output_dir, args.num_episode,
-            streaming=args.streaming, flush_interval=args.flush_interval)
+            streaming=args.streaming, flush_interval=args.flush_interval,
+            layer=args.layer)
         if records is not None:
             save_records(records, args.output_dir)
         clean_pufferl.close(pufferl_data)
