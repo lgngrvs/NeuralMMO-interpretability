@@ -125,10 +125,11 @@ Date: 2026-04-10
 - **Method**: Perplexities [50, 75, 100, 120], thorough HDBSCAN sweep
 - **Result**: sub=100 (1268 points) best: noise 28.8%, transition rate 0.43 (huge improvement from 0.96). Score 0.797. Clusters include spatial (spawn area d=-12.6, map edge d=-4.0), equipment, and resource-stress modes. Fails verification on step entropy.
 
-### 17. T-SNE-3d-takeru-10x — Takeru with 10x more data (in progress)
+### 17. T-SNE-3d-takeru-10x — Takeru with 5-8x more data
 - **Dir**: `experiments/T-SNE-3d-takeru-10x/`
-- **Data**: 10x data collection (32 new episodes, seeds 3-10), subsample=100
-- **Status**: Running
+- **Data**: 7 datasets combined (original + extra + batches 3-7), ~7900 points at subsample=100
+- **Method**: PCA 20D, T-SNE 3D [perp 50,75,100,120], HDBSCAN sweep (parallelized)
+- **Result**: Best score 1.981 (perp=100, mcs=15, ms=3, 2 clusters). 1 config passes verification (perp=75, mcs=200, 7 clusters, 28% noise). The d=-12.6 spatial cluster from the 1x experiment shrunk to d=-5 to -7 with more data — confirming it was inflated by small sample size but the signal is real. Transition rates remain ~96% — Takeru's feedforward architecture fundamentally prevents temporally coherent clusters regardless of data quantity.
 
 ---
 
@@ -159,3 +160,9 @@ Date: 2026-04-10
 - The dominant steady-state cluster contains 15+ sub-clusters at fine resolution
 - Core robust sub-modes: dehydration, food-stress, combat engagement, spatial position
 - These appear at every perplexity tested, in both 2D and 3D
+
+### More data confirms but attenuates spatial signal in Takeru
+- With 1x data (1268 points), spatial cluster had self_row d=-12.6 — suspiciously large
+- With 5-8x data (~7900 points), same cluster survives at d=-5 to -7 — real but inflated by small sample
+- The cluster captures early-game agents near spawn (low row, no equipment, full food)
+- More data did NOT help Takeru form stable behavioral modes — the ~96% transition rate persists
