@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """Sweep clustering hyperparameters to find behavioral mode clusters.
 
-Three strategies:
+Four strategies:
   1. PCA → HDBSCAN (high-D density clustering)
   2. PCA → UMAP 2D → HDBSCAN (cluster on UMAP embedding)
   3. PCA → K-means (forced k clusters, good for continuous manifolds)
+  4. PCA → T-SNE 2D → HDBSCAN (cluster on T-SNE embedding)
 
 Usage:
     uv run python sweep_cluster_params.py activation_data/baseline_10M/ --subsample 1
@@ -29,6 +30,7 @@ from analyze_activations import (
     compute_cluster_stats,
     compute_features,
     load_data,
+    run_tsne,
     run_umap,
 )
 
@@ -219,7 +221,20 @@ def main():
     parser.add_argument("--output", type=str, default=None,
                         help="Output CSV path (default: auto-named under sweep_results/)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--tsne-only", action="store_true",
+                        help="Run only T-SNE strategies (Strategy 4)")
+    parser.add_argument("--strategies", type=str, default=None,
+                        help="Comma-separated list of strategy numbers to run (e.g. '1,4'). "
+                             "Default: all strategies (1-4)")
     args = parser.parse_args()
+
+    # Parse --strategies into a set of ints
+    if args.tsne_only:
+        active_strategies = {4}
+    elif args.strategies:
+        active_strategies = {int(s.strip()) for s in args.strategies.split(",")}
+    else:
+        active_strategies = {1, 2, 3, 4}
 
     print("Loading data...", flush=True)
     records, total_datapoints = load_data(args.data_dir, subsample_rate=args.subsample)
@@ -245,83 +260,135 @@ def main():
     UMAP_PCA_DIMS = [20, 30]
     UMAP_NEIGHBORS = [15, 30]
     UMAP_MIN_DISTS = [0.0, 0.1]
-    print("Pre-computing UMAP embeddings...", flush=True)
     umap_cache = {}
-    for pca_d in UMAP_PCA_DIMS:
-        for nn in UMAP_NEIGHBORS:
-            for md in UMAP_MIN_DISTS:
-                key = (pca_d, nn, md)
-                print(f"  UMAP: PCA={pca_d}D, n_neighbors={nn}, min_dist={md}...", flush=True)
-                emb, _ = run_umap(pca_cache[pca_d], n_neighbors=nn,
-                                  min_dist=md, random_state=args.seed)
-                umap_cache[key] = emb
-    print()
+    if 2 in active_strategies:
+        print("Pre-computing UMAP embeddings...", flush=True)
+        for pca_d in UMAP_PCA_DIMS:
+            for nn in UMAP_NEIGHBORS:
+                for md in UMAP_MIN_DISTS:
+                    key = (pca_d, nn, md)
+                    print(f"  UMAP: PCA={pca_d}D, n_neighbors={nn}, min_dist={md}...", flush=True)
+                    emb, _ = run_umap(pca_cache[pca_d], n_neighbors=nn,
+                                      min_dist=md, random_state=args.seed)
+                    umap_cache[key] = emb
+        print()
+
+    # --- Pre-compute T-SNE embeddings for a few PCA dims ---
+    TSNE_PCA_DIMS = [20, 30]
+    TSNE_PERPLEXITIES = [5, 15, 30, 50]
+    tsne_cache = {}
+    if 4 in active_strategies:
+        print("Pre-computing T-SNE embeddings...", flush=True)
+        for pca_d in TSNE_PCA_DIMS:
+            for perp in TSNE_PERPLEXITIES:
+                # perplexity must be < n_samples; skip if too large
+                if perp >= pca_cache[pca_d].shape[0]:
+                    continue
+                key = (pca_d, perp)
+                print(f"  T-SNE: PCA={pca_d}D, perplexity={perp}...", flush=True)
+                emb, _ = run_tsne(pca_cache[pca_d], perplexity=perp,
+                                  random_state=args.seed)
+                tsne_cache[key] = emb
+        print()
 
     results = []
 
     # ===================================================================
     # Strategy 1: PCA → HDBSCAN (high-D)
     # ===================================================================
-    hdbscan_mcs = [50, 100, 200, 400]
-    hdbscan_ms = [5, 10, 25]
-    grid1 = list(product(PCA_DIMS, hdbscan_mcs, hdbscan_ms))
-    print(f"Strategy 1: PCA → HDBSCAN ({len(grid1)} combos)")
-    for pca_dims, mcs, ms in tqdm(grid1, desc="S1: PCA+HDBSCAN"):
-        if ms > mcs:
-            continue
-        act_reduced = pca_cache[pca_dims]
-        clusterer = hdbscan_lib.HDBSCAN(min_cluster_size=mcs, min_samples=ms)
-        labels = clusterer.fit_predict(act_reduced)
-        score, detail = score_combo(labels, features, metadata, min_trustworthy, args.seed)
-        row = {
-            "strategy": "pca_hdbscan",
-            "pca_dims": pca_dims, "umap_neighbors": "", "umap_min_dist": "",
-            "algo": "hdbscan", "k_or_mcs": mcs, "min_samples": ms,
-            **{k: v for k, v in detail.items() if k != "stats"},
-        }
-        results.append((score, row, detail, labels))
+    if 1 in active_strategies:
+        hdbscan_mcs = [50, 100, 200, 400]
+        hdbscan_ms = [5, 10, 25]
+        grid1 = list(product(PCA_DIMS, hdbscan_mcs, hdbscan_ms))
+        print(f"Strategy 1: PCA → HDBSCAN ({len(grid1)} combos)")
+        for pca_dims, mcs, ms in tqdm(grid1, desc="S1: PCA+HDBSCAN"):
+            if ms > mcs:
+                continue
+            act_reduced = pca_cache[pca_dims]
+            clusterer = hdbscan_lib.HDBSCAN(min_cluster_size=mcs, min_samples=ms)
+            labels = clusterer.fit_predict(act_reduced)
+            score, detail = score_combo(labels, features, metadata, min_trustworthy, args.seed)
+            row = {
+                "strategy": "pca_hdbscan",
+                "pca_dims": pca_dims, "umap_neighbors": "", "umap_min_dist": "",
+                "tsne_perplexity": "",
+                "algo": "hdbscan", "k_or_mcs": mcs, "min_samples": ms,
+                **{k: v for k, v in detail.items() if k != "stats"},
+            }
+            results.append((score, row, detail, labels))
 
     # ===================================================================
     # Strategy 2: PCA → UMAP 2D → HDBSCAN
     # ===================================================================
-    umap_mcs = [50, 100, 200, 400]
-    umap_ms = [5, 10, 25]
-    grid2 = list(product(UMAP_PCA_DIMS, UMAP_NEIGHBORS, UMAP_MIN_DISTS,
-                         umap_mcs, umap_ms))
-    print(f"Strategy 2: PCA → UMAP → HDBSCAN ({len(grid2)} combos)")
-    for pca_d, nn, md, mcs, ms in tqdm(grid2, desc="S2: UMAP+HDBSCAN"):
-        if ms > mcs:
-            continue
-        emb = umap_cache[(pca_d, nn, md)]
-        clusterer = hdbscan_lib.HDBSCAN(min_cluster_size=mcs, min_samples=ms)
-        labels = clusterer.fit_predict(emb)
-        score, detail = score_combo(labels, features, metadata, min_trustworthy, args.seed)
-        row = {
-            "strategy": "umap_hdbscan",
-            "pca_dims": pca_d, "umap_neighbors": nn, "umap_min_dist": md,
-            "algo": "hdbscan", "k_or_mcs": mcs, "min_samples": ms,
-            **{k: v for k, v in detail.items() if k != "stats"},
-        }
-        results.append((score, row, detail, labels))
+    if 2 in active_strategies:
+        umap_mcs = [50, 100, 200, 400]
+        umap_ms = [5, 10, 25]
+        grid2 = list(product(UMAP_PCA_DIMS, UMAP_NEIGHBORS, UMAP_MIN_DISTS,
+                             umap_mcs, umap_ms))
+        print(f"Strategy 2: PCA → UMAP → HDBSCAN ({len(grid2)} combos)")
+        for pca_d, nn, md, mcs, ms in tqdm(grid2, desc="S2: UMAP+HDBSCAN"):
+            if ms > mcs:
+                continue
+            emb = umap_cache[(pca_d, nn, md)]
+            clusterer = hdbscan_lib.HDBSCAN(min_cluster_size=mcs, min_samples=ms)
+            labels = clusterer.fit_predict(emb)
+            score, detail = score_combo(labels, features, metadata, min_trustworthy, args.seed)
+            row = {
+                "strategy": "umap_hdbscan",
+                "pca_dims": pca_d, "umap_neighbors": nn, "umap_min_dist": md,
+                "tsne_perplexity": "",
+                "algo": "hdbscan", "k_or_mcs": mcs, "min_samples": ms,
+                **{k: v for k, v in detail.items() if k != "stats"},
+            }
+            results.append((score, row, detail, labels))
 
     # ===================================================================
     # Strategy 3: PCA → K-means
     # ===================================================================
-    K_VALUES = [2, 3, 4, 5, 6, 7, 8]
-    grid3 = list(product(PCA_DIMS, K_VALUES))
-    print(f"Strategy 3: PCA → K-means ({len(grid3)} combos)")
-    for pca_dims, k in tqdm(grid3, desc="S3: PCA+KMeans"):
-        act_reduced = pca_cache[pca_dims]
-        km = KMeans(n_clusters=k, random_state=args.seed, n_init=10)
-        labels = km.fit_predict(act_reduced)
-        score, detail = score_combo(labels, features, metadata, min_trustworthy, args.seed)
-        row = {
-            "strategy": "pca_kmeans",
-            "pca_dims": pca_dims, "umap_neighbors": "", "umap_min_dist": "",
-            "algo": "kmeans", "k_or_mcs": k, "min_samples": "",
-            **{k_: v for k_, v in detail.items() if k_ != "stats"},
-        }
-        results.append((score, row, detail, labels))
+    if 3 in active_strategies:
+        K_VALUES = [2, 3, 4, 5, 6, 7, 8]
+        grid3 = list(product(PCA_DIMS, K_VALUES))
+        print(f"Strategy 3: PCA → K-means ({len(grid3)} combos)")
+        for pca_dims, k in tqdm(grid3, desc="S3: PCA+KMeans"):
+            act_reduced = pca_cache[pca_dims]
+            km = KMeans(n_clusters=k, random_state=args.seed, n_init=10)
+            labels = km.fit_predict(act_reduced)
+            score, detail = score_combo(labels, features, metadata, min_trustworthy, args.seed)
+            row = {
+                "strategy": "pca_kmeans",
+                "pca_dims": pca_dims, "umap_neighbors": "", "umap_min_dist": "",
+                "tsne_perplexity": "",
+                "algo": "kmeans", "k_or_mcs": k, "min_samples": "",
+                **{k_: v for k_, v in detail.items() if k_ != "stats"},
+            }
+            results.append((score, row, detail, labels))
+
+    # ===================================================================
+    # Strategy 4: PCA → T-SNE 2D → HDBSCAN
+    # ===================================================================
+    if 4 in active_strategies:
+        tsne_mcs = [50, 100, 200, 400]
+        tsne_ms = [5, 10, 25]
+        grid4 = list(product(TSNE_PCA_DIMS, TSNE_PERPLEXITIES, tsne_mcs, tsne_ms))
+        print(f"Strategy 4: PCA → T-SNE → HDBSCAN ({len(grid4)} combos)")
+        for pca_d, perp, mcs, ms in tqdm(grid4, desc="S4: TSNE+HDBSCAN"):
+            if ms > mcs:
+                continue
+            key = (pca_d, perp)
+            if key not in tsne_cache:
+                continue
+            emb = tsne_cache[key]
+            clusterer = hdbscan_lib.HDBSCAN(min_cluster_size=mcs, min_samples=ms)
+            labels = clusterer.fit_predict(emb)
+            score, detail = score_combo(labels, features, metadata, min_trustworthy, args.seed)
+            row = {
+                "strategy": "tsne_hdbscan",
+                "pca_dims": pca_d, "umap_neighbors": "", "umap_min_dist": "",
+                "tsne_perplexity": perp,
+                "algo": "hdbscan", "k_or_mcs": mcs, "min_samples": ms,
+                **{k: v for k, v in detail.items() if k != "stats"},
+            }
+            results.append((score, row, detail, labels))
 
     # Sort by score descending
     results.sort(key=lambda x: x[0], reverse=True)
@@ -339,6 +406,7 @@ def main():
 
     fieldnames = [
         "strategy", "pca_dims", "umap_neighbors", "umap_min_dist",
+        "tsne_perplexity",
         "algo", "k_or_mcs", "min_samples",
         "n_clusters_raw", "n_clusters", "noise_pct",
         "mean_weighted_d", "cluster_count_factor", "entropy_factor",
@@ -354,17 +422,19 @@ def main():
     print(f"\nWrote {csv_path} ({len(results)} combos)")
 
     # Console: top 20
-    print(f"\n{'='*120}")
-    print(f"{'Strategy':>15} {'PCA':>4} {'UNN':>4} {'UMD':>5} {'Algo':>8} "
+    print(f"\n{'='*130}")
+    print(f"{'Strategy':>15} {'PCA':>4} {'UNN':>4} {'UMD':>5} {'Perp':>5} {'Algo':>8} "
           f"{'K/MCS':>6} {'MS':>4} {'#Cl':>4} {'Noise%':>7} "
           f"{'WtdD':>6} {'Ent':>5} {'Score':>7} {'Pass':>5}")
-    print(f"{'-'*120}")
+    print(f"{'-'*130}")
     for i, (score, row, detail, _) in enumerate(results[:20]):
         un = row['umap_neighbors'] if row['umap_neighbors'] != '' else '-'
         ud = row['umap_min_dist'] if row['umap_min_dist'] != '' else '-'
+        tp = row.get('tsne_perplexity', '')
+        tp = tp if tp != '' else '-'
         ms = row['min_samples'] if row['min_samples'] != '' else '-'
         print(f"{row['strategy']:>15} {row['pca_dims']:4} {str(un):>4} {str(ud):>5} "
-              f"{row['algo']:>8} {row['k_or_mcs']:>6} {str(ms):>4} "
+              f"{str(tp):>5} {row['algo']:>8} {row['k_or_mcs']:>6} {str(ms):>4} "
               f"{row['n_clusters']:4} {row['noise_pct']:6.1f}% "
               f"{row['mean_weighted_d']:6.2f} {row['entropy_factor']:5.2f} "
               f"{row['composite_score']:7.3f} {'YES' if row['passes_verification'] else 'no':>5}")
@@ -380,6 +450,8 @@ def main():
     if best_row['umap_neighbors'] != '':
         print(f"  UMAP: n_neighbors={best_row['umap_neighbors']}, "
               f"min_dist={best_row['umap_min_dist']}")
+    if best_row.get('tsne_perplexity', '') != '':
+        print(f"  T-SNE: perplexity={best_row['tsne_perplexity']}")
     print(f"Score: {best_score:.3f}  "
           f"({best_row['n_clusters']} clusters, {best_row['noise_pct']:.1f}% noise)")
     print(f"{'='*120}")
@@ -396,16 +468,21 @@ def main():
             print(f"      {rank+1}. {FEATURE_NAMES[idx]:25s} d={d:+.2f}")
 
     # Visualize best combo
-    # Use a UMAP embedding for visualization
-    # If best used UMAP, reuse that embedding; otherwise compute one
+    # Reuse the embedding from the best strategy if available; otherwise compute one
     if best_row['strategy'] == 'umap_hdbscan' and best_row['umap_neighbors'] != '':
         key = (best_row['pca_dims'], best_row['umap_neighbors'],
                best_row['umap_min_dist'])
         best_embedding = umap_cache[key]
+    elif best_row['strategy'] == 'tsne_hdbscan' and best_row.get('tsne_perplexity', '') != '':
+        key = (best_row['pca_dims'], best_row['tsne_perplexity'])
+        best_embedding = tsne_cache[key]
     else:
         # Use default UMAP on PCA 30D for viz
         if (30, 15, 0.1) in umap_cache:
             best_embedding = umap_cache[(30, 15, 0.1)]
+        elif tsne_cache:
+            # Fall back to first available T-SNE embedding
+            best_embedding = next(iter(tsne_cache.values()))
         else:
             print("\nRunning UMAP for visualization...", flush=True)
             best_embedding, _ = run_umap(pca_cache[30], n_neighbors=15,
