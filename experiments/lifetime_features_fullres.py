@@ -35,9 +35,9 @@ import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
 
-# Add repo root to path so we can import analyze_activations
+# Add scripts/ to path so we can import analyze_activations
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from analyze_activations import load_data, compute_features, FEATURE_NAMES
 
 # ---------------------------------------------------------------------------

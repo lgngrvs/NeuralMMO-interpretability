@@ -29,7 +29,7 @@ from sklearn.neighbors import NearestNeighbors
 # Paths (relative to repo root)
 # ---------------------------------------------------------------------------
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from analyze_activations import load_data, compute_features, FEATURE_NAMES
 

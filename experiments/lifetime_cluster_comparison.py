@@ -25,9 +25,9 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import ListedColormap, BoundaryNorm
 import numpy as np
 
-# Add repo root to path so we can import analyze_activations
+# Add scripts/ to path so we can import analyze_activations
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from analyze_activations import load_data, compute_features
 
 # ---------------------------------------------------------------------------

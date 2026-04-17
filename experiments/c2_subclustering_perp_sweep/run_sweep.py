@@ -15,10 +15,10 @@ import sys
 
 import numpy as np
 
-# Ensure project root is on the path
+# Ensure scripts/ is on the path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
-sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
 
 from analyze_activations import (
     FEATURE_NAMES,

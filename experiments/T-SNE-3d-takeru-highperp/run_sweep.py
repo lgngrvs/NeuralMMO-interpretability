@@ -19,9 +19,9 @@ import numpy as np
 from sklearn.decomposition import PCA
 from tqdm import tqdm
 
-# Add repo root to path
+# Add scripts/ to path
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from analyze_activations import (
     FEATURE_NAMES,

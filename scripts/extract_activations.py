@@ -7,6 +7,10 @@ agent IDs, env IDs, activations, observations, and actions to JSON files.
 Each record is tagged with the policy name that produced it.
 """
 
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import argparse
 import json
 import logging

@@ -25,9 +25,9 @@ CSV_PATH = os.path.join(SCRIPT_DIR, "sweep_results.csv")
 VIZ_DIR = os.path.join(SCRIPT_DIR, "visualizations")
 os.makedirs(VIZ_DIR, exist_ok=True)
 
-# Add project root so we can import from analyze_activations
+# Add scripts/ to path so we can import from analyze_activations
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../.."))
-sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
 
 # ---------------------------------------------------------------------------
 # Load data

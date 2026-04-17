@@ -24,9 +24,9 @@ import hdbscan as hdbscan_lib
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
-# Add project root to path
+# Add scripts/ to path
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
-sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
 
 from analyze_activations import (
     FEATURE_NAMES,

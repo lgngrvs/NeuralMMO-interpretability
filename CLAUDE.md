@@ -40,19 +40,19 @@ When running interpretability experiments (probes, clustering, mediation analysi
 
 ## Experiment Results
 
-All experiment outputs must be saved under `experiments/<experiment_name>/`. Each experiment directory should contain an `experiments/<experiment_name>/visualization/` subdirectory with the highlight results, summary plots, and key findings — this is the canonical place the user looks first to see what an experiment produced.
+All experiment outputs must be saved under `results/<experiment_name>/`. Each experiment directory **must** contain a `results/<experiment_name>/summary.png` — a single image (possibly multi-panel) showing the key results of the experiment. This is what the user looks at first.
 
-**Never overwrite prior results.** Every experimental run gets its own directory. If re-running an experiment (same or modified), create a new directory — e.g., `experiments/linear_probes_2_larger_pca_dim/`. The suffix should briefly describe what changed from the prior run.
+**Never overwrite prior results.** Every experimental run gets its own directory. If re-running an experiment (same or modified), create a new directory — e.g., `results/linear_probes_2_larger_pca_dim/`. The suffix should briefly describe what changed from the prior run.
 
-**Displaying plots:** After an experiment finishes, print `imgcat <path>` for each key plot in the visualization directory so the user can immediately see the results in-terminal. For example:
+**Displaying plots:** After an experiment finishes, print `imgcat results/<experiment_name>/summary.png` so the user can immediately see the results in-terminal. For additional detail plots:
 ```
-imgcat experiments/linear_probes/visualization/probe_r2_summary.png
-imgcat experiments/linear_probes/visualization/feature_importance.png
+imgcat results/<experiment_name>/summary.png
+imgcat results/<experiment_name>/detail_plot_1.png
 ```
 
 ### Experiment Log
 
-Maintain a running log at `experiments/<experiment_name>/LOG.md` for each experiment. Structure:
+Maintain a running log at `results/<experiment_name>/LOG.md` for each experiment. Structure:
 
 ```markdown
 # <Experiment Name> Log
@@ -69,7 +69,7 @@ Maintain a running log at `experiments/<experiment_name>/LOG.md` for each experi
 
 Keep the detailed log entries concise — the goal is retrace-ability, not a transcript. Update "Key Findings" whenever a step produces a notable result.
 
-Additionally, maintain a **global** experiment log at `experiments/EXPERIMENT_LOG.md` that indexes all experiments. Each entry should link to the experiment's directory and LOG.md, with a one-line summary of what was run and what was found. This is the single place to see all experiments at a glance.
+Additionally, maintain a **global** experiment log at `results/EXPERIMENT_LOG.md` that indexes all experiments. Each entry should link to the experiment's directory and LOG.md, with a one-line summary of what was run and what was found. This is the single place to see all experiments at a glance.
 
 ## Project Overview
 
@@ -115,22 +115,22 @@ uv run python train.py --syllabus            # with curriculum learning
 ### Interpretability Pipeline
 ```bash
 # 1. Extract activations
-uv run python extract_activations.py pve -p takeru -o activation_data
+uv run python scripts/extract_activations.py pve -p takeru -o activation_data
 
 # 2. Cluster & visualize
-uv run python analyze_activations.py activation_data/takeru_200M --subsample 10
+uv run python scripts/analyze_activations.py activation_data/takeru_200M --subsample 10
 
 # 3. Linear probes (ridge regression + logistic)
-uv run python train_probes.py activation_data/takeru_200M
+uv run python scripts/train_probes.py activation_data/takeru_200M
 
 # 4. Nonlinear probes (2-layer MLP)
-uv run python train_nonlinear_probes.py activation_data/takeru_200M
+uv run python scripts/train_nonlinear_probes.py activation_data/takeru_200M
 
 # 5. Causal mediation analysis
-uv run python mediation_analysis.py activation_data/takeru_200M
+uv run python scripts/mediation_analysis.py activation_data/takeru_200M
 
 # 6. Activation patching (interchange interventions)
-uv run python activation_patching.py activation_data/takeru_200M
+uv run python scripts/activation_patching.py activation_data/takeru_200M
 ```
 
 ### Evaluation
@@ -145,16 +145,16 @@ uv run python analysis/proc_eval_result.py policies
 `train.py` loads an agent from `agent_zoo/` and config from `config.yaml`, then delegates to `train_helper.py` which uses `reinforcement_learning/clean_pufferl.py` (PufferLib-based PPO). Each agent in `agent_zoo/` (neurips23_start_kit, yaofeng, takeru, hybrid) exports `Policy`, `Recurrent`, and `RewardWrapper`. The policy's action decoder produces 256-dim hidden states that are the target of all interpretability analysis.
 
 ### Activation Extraction
-`extract_activations.py` registers forward hooks on the action decoder layers to capture per-timestep 256-dim activations. Output is JSON/JSONL under `activation_data/<policy_name>/` with per-record: agent_id, env_id, activations, observations, actions. Uses `StreamingRecordWriter` for large-scale extraction.
+`scripts/extract_activations.py` registers forward hooks on the action decoder layers to capture per-timestep 256-dim activations. Output is JSON/JSONL under `activation_data/<policy_name>/` with per-record: agent_id, env_id, activations, observations, actions. Uses `StreamingRecordWriter` for large-scale extraction.
 
 ### Behavioral Features
 35 features derived from observations, grouped into: vitals (health, food, water, gold), position, entity counts, combat stats, inventory, skill levels, temporal (tick, time_alive), and action flags (is_moving, is_attacking, is_trading, is_using_item). These features are the dependent variables for probes and the labels for cluster analysis.
 
 ### Probes
-`train_probes.py` fits ridge regression (continuous features) and logistic regression (binary features) on PCA-reduced (50d) activations. Uses trajectory-based train/test split to avoid temporal leakage. Reports R^2 and AUC per feature, with shuffle baselines. `train_nonlinear_probes.py` adds 2-layer MLP probes for comparison.
+`scripts/train_probes.py` fits ridge regression (continuous features) and logistic regression (binary features) on PCA-reduced (50d) activations. Uses trajectory-based train/test split to avoid temporal leakage. Reports R^2 and AUC per feature, with shuffle baselines. `scripts/train_nonlinear_probes.py` adds 2-layer MLP probes for comparison.
 
 ### Causal Analysis
-`mediation_analysis.py` uses Frisch-Waugh-Lovell residualization to test for confounds between features. `activation_patching.py` performs interchange interventions along probe-identified directions, measuring effect on action logits via KL divergence.
+`scripts/mediation_analysis.py` uses Frisch-Waugh-Lovell residualization to test for confounds between features. `scripts/activation_patching.py` performs interchange interventions along probe-identified directions, measuring effect on action logits via KL divergence.
 
 ## Key Configuration
 
@@ -167,6 +167,10 @@ uv run python analysis/proc_eval_result.py policies
 ## Data Directories
 
 - `activation_data/`: Extracted activations (JSON/JSONL + binary caches)
-- `analysis_results/`: Probe results, clustering outputs, plots
+- `results/`: All experiment outputs (plots, models, metrics)
 - `policies/`: Trained model checkpoints
 - `maps/`: Environment maps for different agents (train/, train_takeru/, train_yaofeng/)
+
+## Repo Structure
+
+See `docs/REPO_STRUCTURE.md` for a full directory tree, import dependency graph, and layout of all scripts, results, and data directories. See `scripts/SCRIPTS.md` for documentation of each interpretability script.
