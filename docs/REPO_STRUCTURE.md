@@ -18,8 +18,7 @@ NeuralMMO-interpretability/
 ├── analysis/                 # Evaluation result processing scripts
 │
 ├── activation_data/          # Extracted activations (JSON/JSONL + .cache.npz)
-├── results/                  # All experiment outputs (plots, models, metrics)
-├── experiments/              # Experiment-specific scripts + EXPERIMENT_LOG.md
+├── experiments/              # All experiment outputs + EXPERIMENT_LOG.md — one subdir per experiment
 ├── policies/                 # Trained model checkpoints
 ├── maps/                     # Environment maps (train/, train_takeru/, train_yaofeng/)
 │
@@ -74,25 +73,6 @@ agent_zoo/
 └── hybrid/                # Hybrid approach
 ```
 
-## results/
-
-Every experiment has its own subdirectory. Each should contain a `summary.png` with key results.
-
-```
-results/
-├── linear_baseline/              # Linear probes on 1x data
-├── linear_10x/                   # Linear probes on 10x data
-├── linear_balanced/              # Linear probes with class reweighting
-├── nonlinear_baseline/           # MLP probes on 1x data
-├── nonlinear_10x/                # MLP probes on 10x data (large hidden)
-├── nonlinear_10x_small/          # MLP probes on 10x data (small hidden)
-├── mediation_analysis/           # Causal mediation (FWL residualization)
-├── activation_patching/          # Subspace activation patching
-├── clustering_param_sweep/       # Clustering hyperparameter sweep (K-means, HDBSCAN, UMAP)
-├── agent_lifetime_visualization/ # Agent lifetime plots
-└── activation_controls/          # Activation sensitivity sanity checks
-```
-
 ## activation_data/
 
 Extracted activations from trained policies. Not git-tracked. ~43GB total.
@@ -112,19 +92,43 @@ activation_data/
 
 ## experiments/
 
-Experiment-specific scripts and the global experiment log. Each subdirectory contains a script used for one specific experiment run.
+Every experiment has its own subdirectory. Each should contain a `summary.png` (key results) and a `LOG.md` (findings + hyperparameters). Experiment-specific run scripts (when they exist) live alongside the output artifacts.
 
 ```
 experiments/
-├── EXPERIMENT_LOG.md              # Global experiment log (all experiments indexed)
+├── EXPERIMENT_LOG.md              # Global index — all experiments with one-line summaries
+│
+│ # Probe experiments
+├── linear_baseline/               # Linear probes on 1x data
+├── linear_10x/                    # Linear probes on 10x data
+├── linear_balanced/               # Linear probes with class reweighting
+├── nonlinear_baseline/            # MLP probes on 1x data
+├── nonlinear_10x/                 # MLP probes on 10x data (large hidden)
+├── nonlinear_10x_small/           # MLP probes on 10x data (small hidden)
+│
+│ # Causal experiments
+├── mediation_analysis/            # Causal mediation (FWL residualization)
+├── activation_patching/           # Subspace activation patching
+│
+│ # Sanity checks
+├── activation_controls/           # Activation sensitivity controls
+│
+│ # Clustering experiments
+├── clustering_param_sweep/        # Clustering hyperparameter sweep
 ├── T-SNE_sweep/                   # 2D T-SNE sweep on baseline_10M
 ├── T-SNE-sweep-yaofeng-200M/      # 2D T-SNE sweep on yaofeng_200M
 ├── T-SNE-3d-takeru-*/             # Various 3D T-SNE experiments on Takeru
-├── T-SNE-3d-yaofeng-lstm-cell-*/  # LSTM cell state clustering experiments
-├── c2_subclustering*/             # Sub-clustering of yaofeng's dominant C2 cluster
+├── T-SNE-3d-yaofeng-lstm-cell-*/  # LSTM cell state clustering
+├── c2_subclustering*/             # Sub-clustering of yaofeng's dominant C2
 ├── cluster_separability/          # Statistical separability analysis
-├── lifetime_*.py                  # Agent lifetime cluster analysis scripts
-└── (each subdir has its own run script)
+│
+│ # Visualization
+├── agent_lifetime_visualization/  # Agent lifetime plots
+│
+│ # Loose scripts (not yet organized into subdirs)
+├── lifetime_cluster_comparison.py
+├── lifetime_features_comparison.py
+└── lifetime_features_fullres.py
 ```
 
 ## Import Dependency Graph

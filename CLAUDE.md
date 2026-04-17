@@ -40,19 +40,19 @@ When running interpretability experiments (probes, clustering, mediation analysi
 
 ## Experiment Results
 
-All experiment outputs must be saved under `results/<experiment_name>/`. Each experiment directory **must** contain a `results/<experiment_name>/summary.png` — a single image (possibly multi-panel) showing the key results of the experiment. This is what the user looks at first.
+All experiment outputs must be saved under `experiments/<experiment_name>/`. Each experiment directory **must** contain a `experiments/<experiment_name>/summary.png` — a single image (possibly multi-panel) showing the key results of the experiment. This is what the user looks at first.
 
-**Never overwrite prior results.** Every experimental run gets its own directory. If re-running an experiment (same or modified), create a new directory — e.g., `results/linear_probes_2_larger_pca_dim/`. The suffix should briefly describe what changed from the prior run.
+**Never overwrite prior results.** Every experimental run gets its own directory. If re-running an experiment (same or modified), create a new directory — e.g., `experiments/linear_probes_2_larger_pca_dim/`. The suffix should briefly describe what changed from the prior run.
 
-**Displaying plots:** After an experiment finishes, print `imgcat results/<experiment_name>/summary.png` so the user can immediately see the results in-terminal. For additional detail plots:
+**Displaying plots:** After an experiment finishes, print `imgcat experiments/<experiment_name>/summary.png` so the user can immediately see the results in-terminal. For additional detail plots:
 ```
-imgcat results/<experiment_name>/summary.png
-imgcat results/<experiment_name>/detail_plot_1.png
+imgcat experiments/<experiment_name>/summary.png
+imgcat experiments/<experiment_name>/detail_plot_1.png
 ```
 
 ### Experiment Log
 
-Maintain a running log at `results/<experiment_name>/LOG.md` for each experiment. Structure:
+Maintain a running log at `experiments/<experiment_name>/LOG.md` for each experiment. Structure:
 
 ```markdown
 # <Experiment Name> Log
@@ -69,7 +69,7 @@ Maintain a running log at `results/<experiment_name>/LOG.md` for each experiment
 
 Keep the detailed log entries concise — the goal is retrace-ability, not a transcript. Update "Key Findings" whenever a step produces a notable result.
 
-Additionally, maintain a **global** experiment log at `results/EXPERIMENT_LOG.md` that indexes all experiments. Each entry should link to the experiment's directory and LOG.md, with a one-line summary of what was run and what was found. This is the single place to see all experiments at a glance.
+Additionally, maintain a **global** experiment log at `experiments/EXPERIMENT_LOG.md` that indexes all experiments. Each entry should link to the experiment's directory and LOG.md, with a one-line summary of what was run and what was found. This is the single place to see all experiments at a glance.
 
 ## Project Overview
 
@@ -167,7 +167,7 @@ uv run python analysis/proc_eval_result.py policies
 ## Data Directories
 
 - `activation_data/`: Extracted activations (JSON/JSONL + binary caches)
-- `results/`: All experiment outputs (plots, models, metrics)
+- `experiments/`: All experiment outputs — each experiment gets its own subdir with `summary.png`, `LOG.md`, and any data/model artifacts
 - `policies/`: Trained model checkpoints
 - `maps/`: Environment maps for different agents (train/, train_takeru/, train_yaofeng/)
 

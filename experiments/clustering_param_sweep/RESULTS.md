@@ -186,7 +186,7 @@ The more-trained policy (takeru_200M) has more concentrated activations (higher 
 ## Files
 
 - `sweep_cluster_params.py` — The sweep script (run with `uv run python sweep_cluster_params.py <data_dir> --subsample 1`)
-- `sweep_results/sweep_baseline_10M_*.csv` — Full ranked results for baseline
-- `sweep_results/sweep_takeru_200M_*.csv` — Full ranked results for takeru
-- `sweep_results/best_umap.png` — UMAP scatter of best combo (last run)
-- `sweep_results/best_features.png` — Cohen's d heatmap of best combo (last run)
+- `experiments/clustering_param_sweep/sweep_baseline_10M_*.csv` — Full ranked results for baseline
+- `experiments/clustering_param_sweep/sweep_takeru_200M_*.csv` — Full ranked results for takeru
+- `experiments/clustering_param_sweep/best_umap.png` — UMAP scatter of best combo (last run)
+- `experiments/clustering_param_sweep/best_features.png` — Cohen's d heatmap of best combo (last run)

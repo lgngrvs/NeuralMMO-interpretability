@@ -198,7 +198,7 @@ Dramatic improvement across the board:
 - fishing_level: 0.03 -> **0.54**
 - Features that were negative R² at 1x became positive at 10x
 
-**Results**: `results/linear_baseline/`, `results/linear_10x/`
+**Results**: `experiments/linear_baseline/`, `experiments/linear_10x/`
 
 #### 19. Class Reweighting
 - **Script**: `train_probes.py --class-weight balanced`
@@ -206,7 +206,7 @@ Dramatic improvement across the board:
 
 Reweighting had modest effects. Binary feature recall improved slightly for rare classes (is_trading, is_using_item) but overall metrics were similar. The main benefit is fairer evaluation on imbalanced features.
 
-**Results**: `results/linear_balanced/`
+**Results**: `experiments/linear_balanced/`
 
 #### 20. Nonlinear (MLP) Probes
 - **Script**: `train_nonlinear_probes.py`
@@ -227,7 +227,7 @@ Reweighting had modest effects. Binary feature recall improved slightly for rare
 ##### Conclusion
 Representations are **mostly linear**. MLPs provide marginal gains on some features but never dramatically outperform linear probes. The activation space encodes behavioral features in largely linearly-accessible directions.
 
-**Results**: `results/nonlinear_baseline/`, `results/nonlinear_10x/`, `results/nonlinear_10x_small/`
+**Results**: `experiments/nonlinear_baseline/`, `experiments/nonlinear_10x/`, `experiments/nonlinear_10x_small/`
 
 ### Causal Analysis (Experiments 21-22)
 
@@ -266,7 +266,7 @@ Many features correlate with game progression. After residualizing tick:
 - Combat levels (melee 31%, range 46%, mage 47%)
 - n_visible_players (26%)
 
-**Results**: `results/mediation_analysis/`
+**Results**: `experiments/mediation_analysis/`
 
 #### 22. Subspace Activation Patching
 - **Script**: `activation_patching.py`
@@ -304,7 +304,7 @@ We patch mid-tick (400-600) and late-tick (>800) components into early-tick (0-1
 
 **Interpretation**: The tick representation is real and causal, but it's a subtle modulator rather than the primary driver of behavioral differences. Most early-vs-late behavioral change comes from other co-varying dimensions (position, resources, combat state) that are not captured by the 1-d tick probe direction.
 
-**Results**: `results/activation_patching/`
+**Results**: `experiments/activation_patching/`
 
 ---
 
@@ -355,13 +355,13 @@ We patch mid-tick (400-600) and late-tick (>800) components into early-tick (0-1
 
 | Experiment Category | Results Directory |
 |---|---|
-| T-SNE clustering parameter sweeps | `results/clustering_param_sweep/` |
-| Linear probes (1x baseline) | `results/linear_baseline/` |
-| Linear probes (10x data) | `results/linear_10x/` |
-| Linear probes (balanced weights) | `results/linear_balanced/` |
-| Nonlinear probes (MLP baseline) | `results/nonlinear_baseline/` |
-| Nonlinear probes (MLP 10x) | `results/nonlinear_10x/` |
-| Nonlinear probes (MLP-8, 10x) | `results/nonlinear_10x_small/` |
-| Causal mediation analysis | `results/mediation_analysis/` |
-| Activation patching | `results/activation_patching/` |
-| Activation controls analysis | `results/activation_controls/` |
+| T-SNE clustering parameter sweeps | `experiments/clustering_param_sweep/` |
+| Linear probes (1x baseline) | `experiments/linear_baseline/` |
+| Linear probes (10x data) | `experiments/linear_10x/` |
+| Linear probes (balanced weights) | `experiments/linear_balanced/` |
+| Nonlinear probes (MLP baseline) | `experiments/nonlinear_baseline/` |
+| Nonlinear probes (MLP 10x) | `experiments/nonlinear_10x/` |
+| Nonlinear probes (MLP-8, 10x) | `experiments/nonlinear_10x_small/` |
+| Causal mediation analysis | `experiments/mediation_analysis/` |
+| Activation patching | `experiments/activation_patching/` |
+| Activation controls analysis | `experiments/activation_controls/` |

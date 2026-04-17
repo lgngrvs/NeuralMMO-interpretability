@@ -80,7 +80,7 @@ uv run python scripts/sweep_cluster_params.py activation_data/yaofeng_200M --sub
 uv run python scripts/sweep_cluster_params.py activation_data/yaofeng_200M --tsne-only --strategies 4
 ```
 
-**When to use:** To find optimal clustering hyperparameters for a new policy or dataset. Results go to `results/clustering_param_sweep/`.
+**When to use:** To find optimal clustering hyperparameters for a new policy or dataset. Results go to `experiments/clustering_param_sweep/`.
 
 ### `sweep_tsne_3d.py` — 3D T-SNE sweep
 
