@@ -32,6 +32,12 @@ dependencies = [
     "joblib",
     "ijson",
     "plotly>=5.0",
+    "ripser>=0.6.14",
+    "persim>=0.3.8",
+    "scikit-dimension>=0.3.4",
+    "kmapper>=2.1.0",
+    "graphriccicurvature>=0.5.3.2",
+    "pandas>=2.3.3",
 ]
 
 [project.optional-dependencies]

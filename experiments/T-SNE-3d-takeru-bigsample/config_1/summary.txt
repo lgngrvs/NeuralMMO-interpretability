@@ -1,0 +1,67 @@
+Strategy: T-SNE 3D + HDBSCAN (ALL Takeru 200M data: base + extra + batch_3..9)
+PCA dims: 20
+T-SNE perplexity: 50
+HDBSCAN min_cluster_size: 50
+HDBSCAN min_samples: 3
+Total data points: 10488
+
+Composite score: 1.4224
+Passes verification: False
+Clusters: 5 (raw: 53)
+Noise: 34.9%
+Mean weighted |d|: 2.639
+Entropy factor: 0.828
+Min step entropy: 0.213
+Min agent entropy: 0.934
+
+================================================================================
+
+Cluster 0 (n=237, 2.3%):
+  Step entropy: 0.213
+  Agent entropy: 0.971
+  Top features:
+    1. self_row                  d=-21.83
+    2. n_equipped_items          d=-5.44
+    3. self_food                 d=+5.05
+    4. item_level                d=-4.93
+    5. n_inventory_items         d=-4.44
+
+Cluster 1 (n=444, 4.2%):
+  Step entropy: 0.930
+  Agent entropy: 0.934
+  Top features:
+    1. n_equipped_items          d=+1.17
+    2. self_food                 d=-0.75
+    3. max_combat_level          d=+0.74
+    4. range_level               d=+0.72
+    5. mage_level                d=+0.69
+
+Cluster 2 (n=335, 3.2%):
+  Step entropy: 0.402
+  Agent entropy: 0.971
+  Top features:
+    1. item_level                d=-3.32
+    2. n_equipped_items          d=-2.85
+    3. self_col                  d=-2.61
+    4. n_inventory_items         d=-2.22
+    5. time_alive                d=-2.05
+
+Cluster 3 (n=318, 3.0%):
+  Step entropy: 0.901
+  Agent entropy: 0.946
+  Top features:
+    1. self_col                  d=+0.44
+    2. self_food                 d=+0.38
+    3. self_health               d=+0.37
+    4. n_visible_entities        d=-0.34
+    5. n_visible_players         d=-0.33
+
+Cluster 4 (n=266, 2.5%):
+  Step entropy: 0.920
+  Agent entropy: 0.938
+  Top features:
+    1. n_equipped_items          d=+0.66
+    2. n_visible_players         d=-0.64
+    3. max_combat_level          d=+0.60
+    4. melee_level               d=+0.60
+    5. range_level               d=+0.59

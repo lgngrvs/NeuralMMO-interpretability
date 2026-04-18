@@ -1,0 +1,77 @@
+Strategy: T-SNE 3D + HDBSCAN (ALL Takeru 200M data: base + extra + batch_3..9)
+PCA dims: 20
+T-SNE perplexity: 150
+HDBSCAN min_cluster_size: 50
+HDBSCAN min_samples: 3
+Total data points: 10488
+
+Composite score: 1.2441
+Passes verification: False
+Clusters: 6 (raw: 44)
+Noise: 45.1%
+Mean weighted |d|: 2.862
+Entropy factor: 0.792
+Min step entropy: 0.238
+Min agent entropy: 0.943
+
+================================================================================
+
+Cluster 0 (n=241, 2.3%):
+  Step entropy: 0.238
+  Agent entropy: 0.972
+  Top features:
+    1. self_row                  d=-13.04
+    2. n_equipped_items          d=-5.49
+    3. item_level                d=-5.08
+    4. is_trading                d=-4.89
+    5. self_food                 d=+4.87
+
+Cluster 1 (n=285, 2.7%):
+  Step entropy: 0.327
+  Agent entropy: 0.973
+  Top features:
+    1. item_level                d=-4.76
+    2. n_equipped_items          d=-4.32
+    3. n_inventory_items         d=-4.32
+    4. self_col                  d=-3.65
+    5. max_harvest_level         d=-3.51
+
+Cluster 2 (n=210, 2.0%):
+  Step entropy: 0.459
+  Agent entropy: 0.970
+  Top features:
+    1. n_equipped_items          d=-3.76
+    2. item_level                d=-3.49
+    3. self_row                  d=+2.54
+    4. is_using_item             d=-2.42
+    5. range_level               d=-2.37
+
+Cluster 3 (n=327, 3.1%):
+  Step entropy: 0.936
+  Agent entropy: 0.943
+  Top features:
+    1. n_equipped_items          d=+1.12
+    2. n_visible_players         d=-0.72
+    3. self_food                 d=-0.70
+    4. item_level                d=+0.70
+    5. max_combat_level          d=+0.64
+
+Cluster 4 (n=271, 2.6%):
+  Step entropy: 0.563
+  Agent entropy: 0.968
+  Top features:
+    1. item_level                d=-2.57
+    2. n_equipped_items          d=-2.55
+    3. max_harvest_level         d=-2.32
+    4. self_gold                 d=-2.28
+    5. max_combat_level          d=-2.23
+
+Cluster 5 (n=497, 4.7%):
+  Step entropy: 0.883
+  Agent entropy: 0.948
+  Top features:
+    1. n_equipped_items          d=+0.98
+    2. n_visible_players         d=-0.86
+    3. self_health               d=+0.80
+    4. item_level                d=+0.72
+    5. self_food                 d=+0.70

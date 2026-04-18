@@ -1,0 +1,77 @@
+Strategy: T-SNE 3D + HDBSCAN (ALL Takeru 200M data: base + extra + batch_3..9)
+PCA dims: 20
+T-SNE perplexity: 50
+HDBSCAN min_cluster_size: 50
+HDBSCAN min_samples: 5
+Total data points: 10488
+
+Composite score: 1.3281
+Passes verification: False
+Clusters: 6 (raw: 48)
+Noise: 37.0%
+Mean weighted |d|: 2.528
+Entropy factor: 0.834
+Min step entropy: 0.211
+Min agent entropy: 0.935
+
+================================================================================
+
+Cluster 0 (n=239, 2.3%):
+  Step entropy: 0.211
+  Agent entropy: 0.971
+  Top features:
+    1. self_row                  d=-21.89
+    2. n_equipped_items          d=-5.28
+    3. self_food                 d=+5.21
+    4. item_level                d=-4.96
+    5. is_using_item             d=-4.65
+
+Cluster 1 (n=220, 2.1%):
+  Step entropy: 0.702
+  Agent entropy: 0.965
+  Top features:
+    1. n_equipped_items          d=-1.66
+    2. item_level                d=-1.52
+    3. max_harvest_level         d=-1.26
+    4. range_level               d=-1.21
+    5. herbalism_level           d=-1.20
+
+Cluster 2 (n=373, 3.6%):
+  Step entropy: 0.937
+  Agent entropy: 0.935
+  Top features:
+    1. n_equipped_items          d=+1.15
+    2. max_combat_level          d=+0.88
+    3. range_level               d=+0.88
+    4. n_visible_players         d=-0.83
+    5. self_food                 d=-0.81
+
+Cluster 3 (n=292, 2.8%):
+  Step entropy: 0.321
+  Agent entropy: 0.972
+  Top features:
+    1. item_level                d=-4.52
+    2. n_equipped_items          d=-4.18
+    3. max_harvest_level         d=-3.25
+    4. self_col                  d=-3.24
+    5. n_inventory_items         d=-3.01
+
+Cluster 4 (n=316, 3.0%):
+  Step entropy: 0.825
+  Agent entropy: 0.958
+  Top features:
+    1. n_equipped_items          d=-0.90
+    2. item_level                d=-0.89
+    3. range_level               d=-0.80
+    4. max_combat_level          d=-0.77
+    5. mage_level                d=-0.76
+
+Cluster 5 (n=572, 5.5%):
+  Step entropy: 0.913
+  Agent entropy: 0.950
+  Top features:
+    1. n_visible_players         d=-0.83
+    2. max_combat_level          d=+0.61
+    3. melee_level               d=+0.57
+    4. mage_level                d=+0.56
+    5. range_level               d=+0.55
