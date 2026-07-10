@@ -16,6 +16,36 @@ uv run python scripts/extract_activations.py --smoke-test  # quick sanity check
 
 **When to use:** First step in any interpretability analysis. Run once per policy/layer combination. Use `--streaming` for large-scale extraction (avoids OOM). Output goes to `activation_data/<policy_name>/`.
 
+### 1b. `extract_activations_parallel.py` — Multi-GPU parallel extraction
+
+Wrapper around `extract_activations.py` that shards extraction across N GPU processes. Each shard runs with a unique seed and `CUDA_VISIBLE_DEVICES` assignment. After all shards complete, merges their JSONL outputs into a single file with remapped `env_id` values (offset by `shard_idx * 10,000,000`) to avoid collisions.
+
+```bash
+# Full 8-GPU extraction (40 episodes total, 5 per shard)
+uv run python scripts/extract_activations_parallel.py pve \
+    -p yaofeng_200M --layers action_decoder,lstm_cell \
+    --num-shards 8 --gpus 0,1,2,3,4,5,6,7 \
+    --base-seed 1000 --num-episode 40 \
+    --streaming --flush-interval 5000 -o activation_data
+
+# Smoke test on 3 GPUs
+OMP_NUM_THREADS=2 uv run python scripts/extract_activations_parallel.py pve \
+    -p yaofeng_200M --layers action_decoder,lstm_cell \
+    --num-shards 3 --gpus 1,2,3 --base-seed 9000 \
+    --num-episode 3 --streaming --flush-interval 500 \
+    -o /tmp/parallel_extract_smoke
+```
+
+**Key arguments:**
+- `--num-shards N`: Number of parallel processes (must equal number of GPUs)
+- `--gpus 0,1,2,...`: Comma-separated GPU indices assigned to each shard
+- `--base-seed S`: Shard i uses seed `S + i` for diverse episode sampling
+- `--num-episode N`: TOTAL episodes; divided evenly among shards (`ceil(N/shards)` each)
+- `--keep-shards`: Preserve per-shard temp directories after merge (default: delete)
+- All `--layers`, `--layer`, `--streaming`, `--flush-interval` flags are passed through
+
+**When to use:** For large-scale extraction runs where single-GPU throughput is a bottleneck. Produces identical JSONL format to the single-process script. Each shard writes to a temp directory; the merge step streams line-by-line (no RAM spike).
+
 ### 2. `analyze_activations.py` — Cluster and visualize activation space
 
 Reduces dimensionality (PCA, UMAP, or T-SNE), clusters with HDBSCAN or K-means, and generates visualization plots. Computes 35 behavioral features and tests cluster-feature associations via Cohen's d.

@@ -431,23 +431,47 @@ def main():
 
     data_dir = Path(args.data_dir)
     json_files = list(data_dir.rglob("activations.json"))
-    if not json_files:
-        print(f"No activations.json found under {args.data_dir}")
+    jsonl_files = list(data_dir.rglob("activations.jsonl"))
+    if not json_files and not jsonl_files:
+        print(f"No activations.json[l] found under {args.data_dir}")
         sys.exit(1)
 
-    json_path = json_files[0]
+    # Prefer JSONL when both exist (newer streaming-extract layout).
+    if jsonl_files:
+        json_path = jsonl_files[0]
+        is_jsonl = True
+    else:
+        json_path = json_files[0]
+        is_jsonl = False
+
+    def _iter_records(path, jsonl):
+        """Yield records one at a time from either a JSON-array file or JSONL."""
+        if jsonl:
+            import orjson
+            with open(path, "rb") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        yield orjson.loads(line)
+                    except Exception:
+                        continue
+        else:
+            with open(path, "rb") as fh:
+                for item in ijson.items(fh, "item", use_float=True):
+                    yield item
 
     # --- Phase 1: Stream to count records per trajectory ---
     print(f"Phase 1: Streaming {json_path.name} to find trajectories...", flush=True)
     trajectory_counts = defaultdict(int)
     n = 0
-    with open(json_path, "rb") as f:
-        for item in ijson.items(f, "item", use_float=True):
-            trajectory_counts[(item["env_id"], item["agent_id"])] += 1
-            n += 1
-            if n % 5000 == 0:
-                print(f"  {n} records scanned, {len(trajectory_counts)} trajectories...",
-                      end="\r", flush=True)
+    for item in _iter_records(json_path, is_jsonl):
+        trajectory_counts[(item["env_id"], item["agent_id"])] += 1
+        n += 1
+        if n % 5000 == 0:
+            print(f"  {n} records scanned, {len(trajectory_counts)} trajectories...",
+                  end="\r", flush=True)
 
     print(f"  {n} records scanned, {len(trajectory_counts)} trajectories found     ")
 
@@ -500,11 +524,10 @@ def main():
     # --- Phase 2: Stream again, collect records for all selected agents ---
     print(f"\nPhase 2: Extracting records for {len(selected)} agent(s)...", flush=True)
     agent_records = defaultdict(list)
-    with open(json_path, "rb") as f:
-        for item in ijson.items(f, "item", use_float=True):
-            key = (item["env_id"], item["agent_id"])
-            if key in target_keys:
-                agent_records[key].append(item)
+    for item in _iter_records(json_path, is_jsonl):
+        key = (item["env_id"], item["agent_id"])
+        if key in target_keys:
+            agent_records[key].append(item)
 
     # --- Determine output directory ---
     if args.num_agents > 1:

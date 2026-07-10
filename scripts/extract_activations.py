@@ -179,21 +179,82 @@ def get_recurrent_wrapper(agent):
 LAYER_CHOICES = ["action_decoder", "lstm_cell", "lstm_hidden", "encoder_output"]
 
 
-def register_hooks(data, layer="action_decoder"):
+def _install_single_hook(agent, layer):
+    """Install a single forward hook for the given layer on the given agent.
+
+    Returns (buffer_list, handle). The buffer is a plain Python list that the
+    hook appends CPU tensors to, one per forward pass.
+    """
+    inner = get_inner_policy(agent)
+    buf = []
+
+    if layer == "action_decoder":
+        def make_hook(buffer):
+            def hook(module, args, output):
+                buffer.append(args[0].detach().cpu())
+            return hook
+
+        handle = inner.action_decoder.register_forward_hook(make_hook(buf))
+
+    elif layer == "lstm_cell":
+        recurrent_wrapper = get_recurrent_wrapper(agent)
+
+        def make_lstm_cell_hook(buffer):
+            def hook(module, input, output):
+                # output is (output_tensor, (h_n, c_n))
+                c_n = output[1][1]
+                last_layer_cell = c_n[-1]  # (batch, hidden_size)
+                buffer.append(last_layer_cell.detach().cpu())
+            return hook
+
+        handle = recurrent_wrapper.recurrent.register_forward_hook(
+            make_lstm_cell_hook(buf))
+
+    elif layer == "lstm_hidden":
+        recurrent_wrapper = get_recurrent_wrapper(agent)
+
+        def make_lstm_hidden_hook(buffer):
+            def hook(module, input, output):
+                h_n = output[1][0]
+                last_layer_hidden = h_n[-1]
+                buffer.append(last_layer_hidden.detach().cpu())
+            return hook
+
+        handle = recurrent_wrapper.recurrent.register_forward_hook(
+            make_lstm_hidden_hook(buf))
+
+    elif layer == "encoder_output":
+        def make_proj_hook(buffer):
+            def hook(module, input, output):
+                buffer.append(output.detach().cpu())
+            return hook
+
+        handle = inner.proj_fc.register_forward_hook(make_proj_hook(buf))
+
+    else:
+        raise ValueError(f"Unknown layer: {layer}")
+
+    return buf, handle
+
+
+def register_hooks(data, layers="action_decoder"):
     """Register activation capture hooks on all policies in the pool.
 
     Args:
         data: pufferl data object with policy_pool.
-        layer: which layer to hook. One of:
-            - 'action_decoder': input to action decoder (args[0]), default
-            - 'lstm_cell': LSTM cell state, last layer (c_n[-1])
-            - 'lstm_hidden': LSTM hidden state, last layer (h_n[-1])
-            - 'encoder_output': output of proj_fc (pre-LSTM)
+        layers: a layer name (str) or a list of layer names. Each layer installs
+            its own forward hook. Supported names: action_decoder, lstm_cell,
+            lstm_hidden, encoder_output.
 
-    Returns (activation_buffers, hook_handles) where activation_buffers is a
-    dict mapping policy_id -> list that the hooks append to, and hook_handles
-    is a list of all handles for later removal.
+    Returns (activation_buffers, hook_handles), where:
+      - activation_buffers maps policy_id -> dict with keys:
+            "name": policy name
+            "buffers": dict {layer_name: [captured cpu tensors...]}
+      - hook_handles is a flat list of all handles for later removal.
     """
+    if isinstance(layers, str):
+        layers = [layers]
+
     pool = data.policy_pool
     activation_buffers = {}
     hook_handles = []
@@ -206,67 +267,16 @@ def register_hooks(data, layer="action_decoder"):
             agent = pool.current_policies[policy_id]["policy"]
             name = pool.current_policies[policy_id]["name"]
 
-        inner = get_inner_policy(agent)
-        buf = []
-        activation_buffers[policy_id] = {"name": name, "buffer": buf}
+        per_layer_buffers = {}
+        for layer in layers:
+            buf, handle = _install_single_hook(agent, layer)
+            per_layer_buffers[layer] = buf
+            hook_handles.append(handle)
 
-        if layer == "action_decoder":
-            # Original behavior: capture args[0] (hidden state input to action decoder)
-            def make_hook(buffer):
-                def hook(module, args, output):
-                    buffer.append(args[0].detach().cpu())
-                return hook
-
-            handle = inner.action_decoder.register_forward_hook(make_hook(buf))
-
-        elif layer == "lstm_cell":
-            # Hook on nn.LSTM: output = (output_tensor, (h_n, c_n))
-            # c_n shape: (num_layers, batch, hidden_size)
-            # We want c_n[-1]: last layer cell state
-            recurrent_wrapper = get_recurrent_wrapper(agent)
-
-            def make_lstm_cell_hook(buffer):
-                def hook(module, input, output):
-                    # output is (output_tensor, (h_n, c_n))
-                    c_n = output[1][1]  # cell state
-                    # c_n shape: (num_layers, seq_len_or_batch, hidden_size)
-                    # Take last layer
-                    last_layer_cell = c_n[-1]  # shape: (batch, hidden_size)
-                    buffer.append(last_layer_cell.detach().cpu())
-                return hook
-
-            handle = recurrent_wrapper.recurrent.register_forward_hook(
-                make_lstm_cell_hook(buf))
-
-        elif layer == "lstm_hidden":
-            # Hook on nn.LSTM: output = (output_tensor, (h_n, c_n))
-            # h_n shape: (num_layers, batch, hidden_size)
-            # We want h_n[-1]: last layer hidden state
-            recurrent_wrapper = get_recurrent_wrapper(agent)
-
-            def make_lstm_hidden_hook(buffer):
-                def hook(module, input, output):
-                    h_n = output[1][0]  # hidden state
-                    last_layer_hidden = h_n[-1]  # shape: (batch, hidden_size)
-                    buffer.append(last_layer_hidden.detach().cpu())
-                return hook
-
-            handle = recurrent_wrapper.recurrent.register_forward_hook(
-                make_lstm_hidden_hook(buf))
-
-        elif layer == "encoder_output":
-            # Hook on proj_fc: output shape (batch, 256)
-            def make_proj_hook(buffer):
-                def hook(module, input, output):
-                    buffer.append(output.detach().cpu())
-                return hook
-
-            handle = inner.proj_fc.register_forward_hook(make_proj_hook(buf))
-
-        else:
-            raise ValueError(f"Unknown layer: {layer}")
-
-        hook_handles.append(handle)
+        activation_buffers[policy_id] = {
+            "name": name,
+            "buffers": per_layer_buffers,
+        }
 
     return activation_buffers, hook_handles
 
@@ -319,7 +329,8 @@ def build_observation_record(env_outputs, idx):
 
 
 def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
-                         streaming=False, flush_interval=5000, layer="action_decoder"):
+                         streaming=False, flush_interval=5000,
+                         layers="action_decoder", subdir_suffix=""):
     """Run evaluation while extracting activations, observations, and actions.
 
     Args:
@@ -327,13 +338,20 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
                    Useful for smoke testing.
         streaming: If True, write records to JSONL incrementally to avoid OOM.
         flush_interval: How often to flush records to disk (only used if streaming=True).
-        layer: Which layer to hook for activation extraction. See register_hooks().
+        layers: Layer name (str) or list of layer names to hook. See register_hooks().
+            When multiple layers are given, each record's "activations" dict maps
+            layer_name -> vector, and top-level "activation" is set to the FIRST
+            layer's vector for backward compatibility.
     """
     config = data.config
     inner_policy = get_inner_policy(data.agent)
     unflatten_context = inner_policy.unflatten_context
 
-    activation_buffers, hook_handles = register_hooks(data, layer=layer)
+    if isinstance(layers, str):
+        layers = [layers]
+    primary_layer = layers[0]
+
+    activation_buffers, hook_handles = register_hooks(data, layers=layers)
     index_to_policy = build_policy_index_map(data)
 
     # Build a mapping from batch index -> position within that policy's subset.
@@ -353,7 +371,9 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
     writer = None
     records = None
     if streaming:
-        writer = StreamingRecordWriter(output_dir, flush_interval=flush_interval)
+        writer = StreamingRecordWriter(
+            output_dir, flush_interval=flush_interval, subdir_suffix=subdir_suffix
+        )
     else:
         records = {}
 
@@ -394,7 +414,8 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
 
                 # Clear buffers before forward pass
                 for info in activation_buffers.values():
-                    info["buffer"].clear()
+                    for buf in info["buffers"].values():
+                        buf.clear()
 
                 actions, logprob, value, next_lstm_state = data.policy_pool.forwards(
                     o_tensor.to(data.device), next_lstm_state
@@ -409,13 +430,16 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
             env_outputs = unpack_observations(o_tensor.to(data.device), unflatten_context)
             agent_ids = extract_agent_ids(env_outputs)
 
-            # Reconstruct per-policy activation tensors
+            # Reconstruct per-policy per-layer activation tensors.
+            # policy_activations[policy_id][layer_name] -> numpy array, shape (subset_size, dim)
             policy_activations = {}
             for policy_id, info in activation_buffers.items():
-                if info["buffer"]:
-                    policy_activations[policy_id] = (
-                        torch.cat(info["buffer"], dim=0).numpy()
-                    )
+                layer_arrays = {}
+                for layer_name, buf in info["buffers"].items():
+                    if buf:
+                        layer_arrays[layer_name] = torch.cat(buf, dim=0).numpy()
+                if layer_arrays:
+                    policy_activations[policy_id] = layer_arrays
 
             # Record data for each alive agent
             for idx in range(len(env_id)):
@@ -425,18 +449,26 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
                 policy_id, subset_pos = index_to_subset_pos[idx]
                 policy_name = index_to_policy[idx]["policy_name"]
 
-                activation = None
-                if policy_id in policy_activations:
-                    activation = policy_activations[policy_id][subset_pos].tolist()
-
-                if activation is None:
+                if policy_id not in policy_activations:
                     continue
+                layer_arrays = policy_activations[policy_id]
+                # Skip if any requested layer failed to capture this step.
+                if not all(layer_name in layer_arrays for layer_name in layers):
+                    continue
+
+                activations_by_layer = {
+                    layer_name: layer_arrays[layer_name][subset_pos].tolist()
+                    for layer_name in layers
+                }
 
                 record = {
                     "step": global_step,
                     "env_id": int(env_id[idx]),
                     "agent_id": int(agent_ids[idx]),
-                    "activation": activation,
+                    # Back-compat: top-level "activation" holds FIRST layer's vector.
+                    "activation": activations_by_layer[primary_layer],
+                    # New: nested dict keyed by layer name for multi-layer runs.
+                    "activations": activations_by_layer,
                     "observation": build_observation_record(env_outputs, idx),
                     "action": actions_np[idx].tolist(),
                 }
@@ -481,12 +513,17 @@ def evaluate_and_extract(data, output_dir, num_eval_episode, max_steps=None,
 class StreamingRecordWriter:
     """Write records to JSONL files incrementally to avoid OOM."""
 
-    def __init__(self, output_dir, flush_interval=5000):
+    def __init__(self, output_dir, flush_interval=5000, subdir_suffix=""):
         self.output_dir = output_dir
         self.flush_interval = flush_interval
+        # Suffix appended to the per-policy output subdir name (e.g. "_multilayer").
+        self.subdir_suffix = subdir_suffix
         self.buffers = {}  # policy_name -> list of records
         self.file_handles = {}  # policy_name -> open file handle
         self.counts = {}  # policy_name -> total records written
+
+    def _subdir_name(self, policy_name):
+        return f"{policy_name}{self.subdir_suffix}"
 
     def append(self, policy_name, record):
         if policy_name not in self.buffers:
@@ -498,7 +535,7 @@ class StreamingRecordWriter:
 
     def _get_handle(self, policy_name):
         if policy_name not in self.file_handles:
-            policy_dir = os.path.join(self.output_dir, policy_name)
+            policy_dir = os.path.join(self.output_dir, self._subdir_name(policy_name))
             os.makedirs(policy_dir, exist_ok=True)
             filepath = os.path.join(policy_dir, "activations.jsonl")
             self.file_handles[policy_name] = open(filepath, "a")
@@ -532,14 +569,16 @@ class StreamingRecordWriter:
     def summary(self):
         for name, count in self.counts.items():
             count += len(self.buffers.get(name, []))
-            filepath = os.path.join(self.output_dir, name, "activations.jsonl")
+            filepath = os.path.join(
+                self.output_dir, self._subdir_name(name), "activations.jsonl"
+            )
             print(f"Saved {count} records to {filepath}")
 
 
-def save_records(all_records, output_dir):
+def save_records(all_records, output_dir, subdir_suffix=""):
     """Save extracted records to JSON files, one per policy (legacy format)."""
     for policy_name, records in all_records.items():
-        policy_dir = os.path.join(output_dir, policy_name)
+        policy_dir = os.path.join(output_dir, f"{policy_name}{subdir_suffix}")
         os.makedirs(policy_dir, exist_ok=True)
         filepath = os.path.join(policy_dir, "activations.json")
         with open(filepath, "w") as f:
@@ -625,14 +664,49 @@ def main():
         "--flush-interval", type=int, default=5000,
         help="Records to buffer before flushing to disk (default: 5000, only with --streaming)")
     parser.add_argument(
-        "--layer", type=str, default="action_decoder",
+        "--layer", type=str, default=None,
         choices=LAYER_CHOICES,
-        help="Which layer to extract activations from (default: action_decoder). "
+        help="Single layer to extract (legacy alias for --layers with one item). "
         "Options: action_decoder (input to action heads), "
         "lstm_cell (LSTM cell state, last layer), "
         "lstm_hidden (LSTM hidden state, last layer), "
         "encoder_output (proj_fc output, pre-LSTM)")
+    parser.add_argument(
+        "--layers", type=str, default=None,
+        help="Comma-separated list of layers to extract in a single rollout. "
+        "When more than one layer is given, the output directory is named "
+        "<policy>_multilayer/ and each record stores per-layer activations "
+        "under an 'activations' dict. The first layer is also mirrored to the "
+        "top-level 'activation' field for backward compatibility. "
+        "Layer choices: " + ", ".join(LAYER_CHOICES))
     args = parser.parse_args()
+
+    # Resolve --layer / --layers into a single list, then pick a friendly name
+    # for output directories when there's only one layer (legacy names preserved).
+    if args.layers is not None:
+        layers_list = [s.strip() for s in args.layers.split(",") if s.strip()]
+    elif args.layer is not None:
+        layers_list = [args.layer]
+    else:
+        layers_list = ["action_decoder"]
+
+    for layer in layers_list:
+        if layer not in LAYER_CHOICES:
+            parser.error(f"unknown layer {layer!r}; choose from {LAYER_CHOICES}")
+    if len(set(layers_list)) != len(layers_list):
+        parser.error(f"duplicate layer name in --layers: {layers_list}")
+
+    multilayer = len(layers_list) > 1
+    primary_layer = layers_list[0]
+
+    # Output subdir suffix:
+    # - Single layer: preserve legacy behavior exactly (no auto-suffix on the
+    #   policy subdir). Callers who want a "_lstm_cell"-style distinguisher
+    #   typically pass `-o activation_data/<policy>_<layer>` themselves.
+    # - Multi-layer: auto-suffix with "_multilayer" so the resulting path is
+    #   activation_data/<policy>_multilayer/activations.jsonl and does not
+    #   collide with any single-layer run.
+    subdir_suffix = "_multilayer" if multilayer else ""
 
     if args.list:
         for name in list_available_policies(args.policies_dir):
@@ -648,14 +722,15 @@ def main():
         policy_store_dir = prepare_policy_dir(policies, args.policies_dir)
         try:
             print(f"Smoke test: {SMOKE_NUM_AGENTS} agents, {SMOKE_NUM_ENVS} env, "
-                  f"{SMOKE_HORIZON} steps, layer={args.layer}")
+                  f"{SMOKE_HORIZON} steps, layers={layers_list}")
             pufferl_data = setup_smoke_test(policy_store_dir, args.task_file, args.seed)
 
             records = evaluate_and_extract(
                 pufferl_data, args.output_dir, num_eval_episode=0,
-                max_steps=SMOKE_HORIZON, layer=args.layer,
+                max_steps=SMOKE_HORIZON, layers=layers_list,
+                subdir_suffix=subdir_suffix,
             )
-            save_records(records, args.output_dir)
+            save_records(records, args.output_dir, subdir_suffix=subdir_suffix)
 
             total = sum(len(v) for v in records.values())
             print(f"Smoke test passed: {total} records extracted across "
@@ -680,9 +755,9 @@ def main():
         records = evaluate_and_extract(
             pufferl_data, args.output_dir, args.num_episode,
             streaming=args.streaming, flush_interval=args.flush_interval,
-            layer=args.layer)
+            layers=layers_list, subdir_suffix=subdir_suffix)
         if records is not None:
-            save_records(records, args.output_dir)
+            save_records(records, args.output_dir, subdir_suffix=subdir_suffix)
         clean_pufferl.close(pufferl_data)
     finally:
         shutil.rmtree(policy_store_dir)

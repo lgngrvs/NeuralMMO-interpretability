@@ -306,6 +306,28 @@ We patch mid-tick (400-600) and late-tick (>800) components into early-tick (0-1
 
 **Results**: `results/activation_patching/`
 
+### LSTM Cell-State Lifetime Clustering (Experiments 24-25)
+
+#### 24. yaofeng_lstm_cell_lifetime — LSTM cell lifetime clustering v1
+- **Dir**: `experiments/yaofeng_lstm_cell_lifetime/`
+- **Data**: yaofeng_200M LSTM cell state (separate extraction), 170,775 alive records
+- **Method**: Subsample 50, PCA(20) -> T-SNE 3D (perp=50, 1000 iters) -> HDBSCAN (mcs=200, ms=3) -> KNN(k=5) propagation
+- **Result**: 3 clusters. C0="Early game" (21%), C1="Engaged/combat" (28%), C2="Steady-state mature" (51%). Transition rate 0.0194 (1.94%). Per-agent match rate 44-95% due to data misalignment (LSTM cell and action decoder extracted in separate rollouts with different seeds).
+
+#### 25. yaofeng_lstm_cell_lifetime_v2 — LSTM cell lifetime clustering v2 (aligned multilayer)
+- **Dir**: `experiments/yaofeng_lstm_cell_lifetime_v2/`
+- **Data**: yaofeng_200M multilayer (single rollout), 210,909 alive records
+- **Method**: Same as v1 pipeline
+- **Result**: 3 clusters. C0="Early game" (18%), C1="Steady-state mature" (69%), C2="Isolated/low-col" (13%). Transition rate 0.0181. **Per-agent match rate 99.9-100%** (fixed by using aligned multilayer data). Replicates v1 cluster structure with perfect data alignment.
+
+### PCA Dimensionality Analysis (Experiment 26)
+
+#### 26. Takeru PCA Dimensionality — Takeru vs Yaofeng AD vs LSTM cell
+- **Dir**: `experiments/takeru_pca_dimensionality/`
+- **Data**: Takeru AD (26,271), Yaofeng AD (36,501), Yaofeng LSTM cell (34,155 after 5x subsample)
+- **Method**: Full PCA(256) spectrum, participation ratio, spectral entropy, cumulative variance thresholds
+- **Result**: Takeru AD is distributed (PR=9.9) but more compact than Yaofeng AD (PR=11.1). Needs 72 PCs for 99% variance vs Yaofeng's 165. Decisively closer to Yaofeng AD than to LSTM cell (PR=1.9, 20 PCs for 99%). Takeru's top PC captures less variance (17.9%) than Yaofeng's (25.7%), meaning its leading components are flatter, but it concentrates faster in the tail.
+
 ---
 
 ## Code Changes
@@ -365,3 +387,6 @@ We patch mid-tick (400-600) and late-tick (>800) components into early-tick (0-1
 | Causal mediation analysis | `results/mediation_analysis/` |
 | Activation patching | `results/activation_patching/` |
 | Activation controls analysis | `results/activation_controls/` |
+| LSTM cell lifetime clustering v1 | `experiments/yaofeng_lstm_cell_lifetime/` |
+| LSTM cell lifetime clustering v2 | `experiments/yaofeng_lstm_cell_lifetime_v2/` |
+| PCA dimensionality (Takeru vs Yaofeng) | `experiments/takeru_pca_dimensionality/` |
