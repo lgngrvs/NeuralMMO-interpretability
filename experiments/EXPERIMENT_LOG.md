@@ -59,7 +59,7 @@ This is the single source of truth for all interpretability experiments run on N
 ## Data Collection
 
 ### Original data (S3)
-- Source: `s3://doxascope-tests/activation_data/`
+- Source: `s3://doxascope/activation_data/` (bucket renamed from `doxascope-tests`, 2026-07-10)
 - 6 policies: baseline_10M, learner, takeru_100M, takeru_200M, yaofeng_100M, yaofeng_200M
 - ~32k records per policy, ~1k after dead-filtering + subsampling (rate=10)
 
@@ -75,7 +75,7 @@ This is the single source of truth for all interpretability experiments run on N
 
 ## Experiments
 
-### T-SNE Clustering (Experiments 1-17)
+### T-SNE Clustering (Experiments 1-17, 23)
 
 #### 1. T-SNE_sweep — baseline_10M 2D T-SNE sweep
 - **Dir**: `experiments/T-SNE_sweep/`
@@ -177,6 +177,12 @@ This is the single source of truth for all interpretability experiments run on N
 - **Data**: 7 datasets combined (original + extra + batches 3-7), ~7900 points at subsample=100
 - **Method**: PCA 20D, T-SNE 3D [perp 50,75,100,120], HDBSCAN sweep (parallelized)
 - **Result**: Best score 1.981 (perp=100, mcs=15, ms=3, 2 clusters). 1 config passes verification (perp=75, mcs=200, 7 clusters, 28% noise). The d=-12.6 spatial cluster from the 1x experiment shrunk to d=-5 to -7 with more data — confirming it was inflated by small sample size but the signal is real. Transition rates remain ~96% — Takeru's feedforward architecture fundamentally prevents temporally coherent clusters regardless of data quantity.
+
+#### 23. T-SNE-3d-takeru-bigsample — Takeru with ALL 9 batches (~35 GB raw)
+- **Dir**: `experiments/T-SNE-3d-takeru-bigsample/`
+- **Data**: 9 datasets combined (original + extra + batches 3-9), 10,488 points at subsample=100 across 1,066 trajectories. Rebuilt stale batch_8 cache and built batch_9 cache from scratch (175k + 73k alive records respectively).
+- **Method**: PCA 20D, T-SNE 3D [perp 50,75,100,125,150] parallelized, HDBSCAN grid (mcs ∈ {50,100,200,400,800}, ms ∈ {3,5,10,25}).
+- **Result**: Best score 1.422 (perp=50, mcs=50, ms=3, 5 clusters, 34.9% noise, weighted |d|=2.64). **0 / 100 configs pass verification** — step entropy fails in the dominant spawn cluster as before. Transition rate 0.9666 (≈ identical to Exps 15/17). The d=-21.8 "spawn-area" mode returns (vs d=-5 to -7 in Exp 17, d=-12.6 in Exp 16) — its magnitude is sample-size-dependent but the signal is stable. **Adding 33 % more data (7,900 → 10,488 points) did NOT expose new behavioral modes or fix the temporal incoherence.** The unstable-clusters-in-takeru phenomenon is architectural, not a data-quantity artifact.
 
 ### Linear and Nonlinear Probes (Experiments 18-20)
 
@@ -306,6 +312,40 @@ We patch mid-tick (400-600) and late-tick (>800) components into early-tick (0-1
 
 **Results**: `experiments/activation_patching/`
 
+### 23. Yaofeng LSTM Cell-State Lifetime Overlay
+- **Dir**: `experiments/yaofeng_lstm_cell_lifetime/` ([LOG.md](yaofeng_lstm_cell_lifetime/LOG.md))
+- **Data**: yaofeng_200M LSTM cell, npz cache (170,775 alive records), subsample=50 → 3,484 points
+- **Method**: PCA(20, 99.1% var) → T-SNE 3D (perp=50, iters=1000) → HDBSCAN (mcs=200, ms=3) on subsample; KNN(k=5) propagates labels to full-resolution; labels overlaid on 7 agents' lifetime timelines via `scripts/agent_life_visualization.py`.
+- **Result**: **3 clusters**, subsample noise 25.3%, full-res tick-to-tick transition rate **0.0194** (extremely temporally coherent). C0 = early-game / fresh-spawn (time_alive d=-3.7, tick d=-3.7), C1 = engaged combat & trade (n_inventory_items d=+0.6, in_combat d=+0.3), C2 = steady-state mature (self_health d=+0.8, n_equipped_items d=+0.6, n_visible_players d=-0.6). Per-agent plots show every life cleanly starts in C0 for ~100-200 ticks then settles into C2, with C1 as intermittent bursts during fights/trades. Deaths+respawns reset the cluster strip to C0.
+
+### Cross-Representation Probes (Experiment 24)
+
+#### 24. LSTM Cluster Probes — Predicting LSTM clusters from action-decoder activations
+- **Dir**: `experiments/lstm_cluster_probes/` ([LOG.md](lstm_cluster_probes/LOG.md))
+- **Data**: Action-decoder cache (yaofeng_200M, 36,501 records, 256-dim) joined with LSTM cell-state cluster labels (3 clusters from Exp 23) on (env_id, agent_id, step) -> 25,920 matched samples across 42 trajectories.
+- **Method**: Multinomial logistic regression on raw 256-dim and PCA-50 activations, trajectory-based 80/20 split. LDA(2) projection for visualization. Cosine similarity between probe weight vectors and top-20 PCA directions.
+- **Result**: **Partially decodable but NOT fully linearly separable.** 256-dim accuracy=0.689 (macro F1=0.652), PCA-50 accuracy=0.709 (F1=0.664), shuffle baseline=0.424. Cluster 0 well-separated (F1=0.83), Cluster 2 moderate (F1=0.75), **Cluster 1 poorly distinguished (F1=0.38)** — heavily confused with Cluster 2. LDA accuracy=0.702 confirms the linear ceiling. **Critical finding: probe weight directions are nearly orthogonal to PCA variance directions** (max |cosine sim| = 0.11). The cluster-discriminating information lives in low-variance subspaces, not principal components.
+
+#### 26. Action-Decoder Cluster Probes (2 clusters) — Predicting AD clusters from AD activations
+- **Dir**: `experiments/action_decoder_cluster_probes/` ([LOG.md](action_decoder_cluster_probes/LOG.md))
+- **Data**: Action-decoder cache (yaofeng_200M, 36,501 records, 256-dim). Clusters generated via PCA(20)->T-SNE 3D (perp=50)->HDBSCAN (mcs=200, ms=3)->KNN propagation. Cross-probe: LSTM cell-state (170,775 records) joined on (env_id, agent_id, step) -> 25,920 matched samples.
+- **Method**: Logistic regression on raw 256-dim and PCA-50 activations, trajectory-based 80/20 split. LDA(1) projection. Cosine similarity between probe weight vector and top-20 PCA directions. Cross-representation probe: LSTM cell-state -> AD clusters.
+- **Result**: **AD T-SNE/HDBSCAN clusters are almost perfectly linearly separable.** Only 2 clusters found (not 3). 256-dim accuracy=**0.992** (macro F1=0.989), PCA-50 accuracy=0.991, LDA=0.988, shuffle baseline=0.771. Both clusters well-separated (C0 F1=0.983, C1 F1=0.995). Max |cosine sim| with PCA = 0.257 (vs 0.11 for LSTM clusters) — AD-cluster boundary is more aligned with variance directions. **Cross-probe: LSTM -> AD clusters = 88.9%** (F1=0.844), showing the AD cluster structure is partially readable from LSTM state. **Key comparison**: AD-cluster from AD (99.2%) >> LSTM-cluster from AD (70.9%). The T-SNE/HDBSCAN step on action-decoder activations found structure that is essentially already linear, unlike the LSTM clusters which require genuinely nonlinear readout.
+
+#### 27. Action-Decoder 3-Cluster Probes — Predicting 3 AD clusters (PCA=30) from AD activations
+- **Dir**: `experiments/action_decoder_cluster_probes_3cl/` ([LOG.md](action_decoder_cluster_probes_3cl/LOG.md))
+- **Data**: Action-decoder cache (yaofeng_200M, 36,501 records, 256-dim). Clusters generated via PCA(30)->T-SNE 3D (perp=50)->HDBSCAN (mcs=200, ms=10)->KNN(k=5) propagation. 3 clusters: C0=6,362, C1=3,017, C2=27,122 (14.6% noise in subsampled data).
+- **Method**: Multinomial logistic regression on raw 256-dim and PCA-50 activations, trajectory-based 80/20 split (42 trajectories -> 33 train/9 test). LDA(2) projection. Cosine similarity between 3 probe weight vectors and top-20 PCA directions. Shuffle baseline.
+- **Result**: **All 3 clusters remain linearly separable.** 256-dim accuracy=**0.975** (macro F1=0.951), PCA-50 accuracy=0.970 (F1=0.936), LDA=0.967, shuffle baseline=0.691. Per-class: C0 F1=0.980, C1 F1=0.888 (smallest cluster, hardest), C2 F1=0.983. Adding the third cluster (fragile food-stressed mode in PCA dims 21-30) drops accuracy only ~1.7pp from the 2-cluster baseline (99.2% -> 97.5%). Probe weight directions are distributed across many PCA components (max |cos_sim|=0.27), meaning cluster boundaries are not aligned with single variance axes. **Key comparison**: 2-cluster PCA=20 (99.2%) > 3-cluster PCA=30 (97.5%) >> LSTM-cluster from AD (70.9%). The third cluster adds meaningful complexity but the representation remains overwhelmingly linear.
+
+### Per-Cluster Internal Structure (Experiment 25)
+
+#### 25. Per-Cluster T-SNE — Internal structure of individual clusters
+- **Dir**: `experiments/per_cluster_tsne/` ([LOG.md](per_cluster_tsne/LOG.md))
+- **Data**: LSTM cell-state (170,775 records, cluster labels from Exp 23) and action-decoder (36,501 records, freshly clustered with PCA(30) -> T-SNE 3D perp=50 -> HDBSCAN mcs=200,ms=3 -> KNN propagation).
+- **Method**: For each representation x each cluster: subsample to 3000 points, PCA(30), T-SNE 2D (top-6 features by intra-cluster std) and 3D (top-1 feature). Perplexity adapted to min(50, N//5).
+- **Result**: **Clusters are NOT homogeneous blobs — all show clear internal structure.** LSTM clusters display smooth continuous gradients organized by time (time_alive/tick) and spatial position (self_row/self_col), without discrete sub-modes. Action decoder clusters show sharper sub-structure: C0 (unequipped) fragments into spatial sub-regions, C2 (steady-state) has a branching topology with temporal and spatial arms. The features that *distinguish* clusters (n_equipped_items, n_inventory_items, self_food) are relatively uniform within each cluster, while temporal/spatial features dominate intra-cluster variation. LSTM cell-state has higher PCA variance explained (98-99%) vs action decoder (83-89%), confirming lower dimensionality, but both show comparable internal structure.
+
 ---
 
 ## Code Changes
@@ -365,3 +405,6 @@ We patch mid-tick (400-600) and late-tick (>800) components into early-tick (0-1
 | Causal mediation analysis | `experiments/mediation_analysis/` |
 | Activation patching | `experiments/activation_patching/` |
 | Activation controls analysis | `experiments/activation_controls/` |
+| LSTM cluster probes | `experiments/lstm_cluster_probes/` |
+| Action-decoder cluster probes (2-cluster) | `experiments/action_decoder_cluster_probes/` |
+| Action-decoder 3-cluster probes (PCA=30) | `experiments/action_decoder_cluster_probes_3cl/` |

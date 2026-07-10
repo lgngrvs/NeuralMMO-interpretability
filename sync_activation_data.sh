@@ -2,7 +2,7 @@
 # Upload and download activation_data to/from S3
 set -euo pipefail
 
-BUCKET="s3://doxascope-tests"
+BUCKET="s3://doxascope"
 S3_PREFIX="${BUCKET}/activation_data"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)/activation_data"
 

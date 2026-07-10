@@ -1,0 +1,91 @@
+{
+  "lstm_cell": {
+    "0": {
+      "n_total": 36146,
+      "n_used": 3000,
+      "pca_explained": 0.9840941429138184,
+      "top_varying_features": [
+        "time_alive",
+        "tick",
+        "self_col",
+        "self_row",
+        "nearest_player_dist",
+        "self_food"
+      ],
+      "top_discriminating_feature": "n_equipped_items"
+    },
+    "1": {
+      "n_total": 48095,
+      "n_used": 3000,
+      "pca_explained": 0.9859153628349304,
+      "top_varying_features": [
+        "time_alive",
+        "tick",
+        "self_col",
+        "self_row",
+        "nearest_player_dist",
+        "self_gold"
+      ],
+      "top_discriminating_feature": "n_inventory_items"
+    },
+    "2": {
+      "n_total": 86534,
+      "n_used": 3000,
+      "pca_explained": 0.9943102598190308,
+      "top_varying_features": [
+        "time_alive",
+        "tick",
+        "self_row",
+        "self_col",
+        "nearest_player_dist",
+        "nearest_entity_dist"
+      ],
+      "top_discriminating_feature": "tick"
+    }
+  },
+  "action_decoder": {
+    "0": {
+      "n_total": 6568,
+      "n_used": 3000,
+      "pca_explained": 0.8331655263900757,
+      "top_varying_features": [
+        "self_col",
+        "self_row",
+        "time_alive",
+        "tick",
+        "nearest_player_dist",
+        "self_food"
+      ],
+      "top_discriminating_feature": "n_equipped_items"
+    },
+    "1": {
+      "n_total": 1136,
+      "n_used": 1136,
+      "pca_explained": 0.893919050693512,
+      "top_varying_features": [
+        "time_alive",
+        "tick",
+        "self_col",
+        "self_row",
+        "nearest_player_dist",
+        "nearest_entity_dist"
+      ],
+      "top_discriminating_feature": "self_food"
+    },
+    "2": {
+      "n_total": 28797,
+      "n_used": 3000,
+      "pca_explained": 0.881653904914856,
+      "top_varying_features": [
+        "time_alive",
+        "tick",
+        "self_col",
+        "nearest_player_dist",
+        "self_row",
+        "nearest_entity_dist"
+      ],
+      "top_discriminating_feature": "n_equipped_items"
+    }
+  },
+  "elapsed_sec": 225.10811758041382
+}
