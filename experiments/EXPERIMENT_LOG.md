@@ -59,7 +59,7 @@ This is the single source of truth for all interpretability experiments run on N
 ## Data Collection
 
 ### Original data (S3)
-- Source: `s3://doxascope-tests/activation_data/`
+- Source: `s3://doxascope/activation_data/` (bucket renamed from `doxascope-tests`, 2026-07-10)
 - 6 policies: baseline_10M, learner, takeru_100M, takeru_200M, yaofeng_100M, yaofeng_200M
 - ~32k records per policy, ~1k after dead-filtering + subsampling (rate=10)
 
